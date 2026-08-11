@@ -64,7 +64,7 @@ export default async function handler(req, res) {
     for (let i = 0; i < d.c.length; i++) if (d.c[i] != null) cl.push(d.c[i]);
     if (cl.length < 2) continue;
     const last = d.meta.last ?? cl[cl.length - 1];
-    const prev = d.meta.prevClose ?? cl[cl.length - 2];
+    const prev = cl[cl.length - 2]; // yesterday's close (meta.prevClose on a 1y range = a year ago!)
     metrics[sym] = {
       sym, last, name: d.meta.name,
       d1: prev ? (last - prev) / prev * 100 : null,
