@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Market Pulse — Live NSE Movers</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e;
+    --green: #3fb950; --red: #f85149; --accent: #58a6ff;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; min-height: 100vh; display: flex; flex-direction: column; }
+
+  header { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 10; }
+  header h1 { font-size: 16px; font-weight: 600; white-space: nowrap; }
+  header h1 span { color: var(--accent); }
+  .badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
+  .badge.open { color: var(--green); border-color: var(--green); }
+  .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-left: auto; }
+  .ctl { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); }
+  select, input[type=text] { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; font-size: 12px; outline: none; }
+  select:focus, input:focus { border-color: var(--accent); }
+  #watchlistBox { display: none; }
+  #watchlistInput { width: 300px; }
+  #status { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  #status b { color: var(--text); font-weight: 500; }
+
+  #strip { display: flex; gap: 8px; overflow-x: auto; padding: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--border); scrollbar-width: none; }
+  #strip::-webkit-scrollbar { display: none; }
+  .chip { display: flex; gap: 6px; align-items: baseline; font-size: 12px; padding: 3px 10px; border: 1px solid var(--border); border-radius: 6px; white-space: nowrap; cursor: default; }
+  .chip .sym { color: var(--text); font-weight: 600; }
+  .chip .chg.up { color: var(--green); } .chip .chg.down { color: var(--red); }
+
+  #grid { flex: 1; display: grid; gap: 10px; padding: 10px 16px 16px; grid-auto-rows: 1fr; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px 6px; display: flex; flex-direction: column; min-height: 150px; overflow: hidden; }
+  .card-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .card-head .sym { font-weight: 700; font-size: 14px; }
+  .card-head .name { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 45%; }
+  .card-head .px { margin-left: auto; font-size: 14px; font-variant-numeric: tabular-nums; }
+  .card-head .chg { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .chg.up { color: var(--green); } .chg.down { color: var(--red); }
+  .card canvas { flex: 1; width: 100%; min-height: 80px; }
+  .card-foot { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); padding-top: 3px; font-variant-numeric: tabular-nums; }
+
+  #msg { text-align: center; color: var(--muted); padding: 40px 20px; font-size: 14px; }
+  #msg.error { color: var(--red); }
+  .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: sp 0.8s linear infinite; vertical-align: -2px; margin-right: 8px; }
+  @keyframes sp { to { transform: rotate(360deg); } }
+
+  @media (max-width: 900px) { #grid { grid-template-columns: repeat(2, 1fr) !important; } }
+  @media (max-width: 560px) { #grid { grid-template-columns: 1fr !important; } #watchlistInput { width: 100%; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Market <span>Pulse</span></h1>
+  <span class="badge" id="mktBadge">…</span>
+  <div class="controls">
+    <label class="ctl">Show
+      <select id="mode">
+        <option value="movers">Top Movers</option>
+        <option value="gainers">Top Gainers</option>
+        <option value="losers">Top Losers</option>
+        <option value="watchlist">My Watchlist</option>
+      </select>
+    </label>
+    <label class="ctl">Charts
+      <select id="count"></select>
+    </label>
+    <label class="ctl">Range
+      <select id="range">
+        <option value="1d|5m">1D · 5m</option>
+        <option value="5d|15m">5D · 15m</option>
+        <option value="1mo|1h">1M · 1h</option>
+        <option value="3mo|1d">3M · 1d</option>
+      </select>
+    </label>
+    <label class="ctl">Refresh
+      <select id="interval">
+        <option value="30">30s</option>
+        <option value="60" selected>60s</option>
+        <option value="120">2m</option>
+        <option value="300">5m</option>
+      </select>
+    </label>
+    <span class="ctl" id="watchlistBox">
+      <input type="text" id="watchlistInput" placeholder="Symbols e.g. RELIANCE, TCS, HDFCBANK" >
+    </span>
+    <span id="status"></span>
+  </div>
+</header>
+
+<div id="strip"></div>
+<div id="msg"><span class="spin"></span>Loading market data…</div>
+<div id="grid"></div>
+
+<script>
+"use strict";
+/* ============ Universe: Nifty 50 + liquid F&O names (NSE) ============ */
+const UNIVERSE = [
+  "RELIANCE","HDFCBANK","ICICIBANK","INFY","TCS","BHARTIARTL","SBIN","AXISBANK",
+  "KOTAKBANK","ITC","LT","HINDUNILVR","BAJFINANCE","MARUTI","M&M","SUNPHARMA",
+  "NTPC","POWERGRID","TITAN","ULTRACEMCO","TATAMOTORS","TATASTEEL","JSWSTEEL",
+  "ASIANPAINT","NESTLEIND","ADANIENT","ADANIPORTS","ONGC","COALINDIA","BAJAJFINSV",
+  "HCLTECH","WIPRO","TECHM","GRASIM","DRREDDY","CIPLA","APOLLOHOSP","EICHERMOT",
+  "HEROMOTOCO","BAJAJ-AUTO","BRITANNIA","TATACONSUM","HINDALCO","INDUSINDBK",
+  "SBILIFE","HDFCLIFE","SHRIRAMFIN","TRENT","BEL","HAL","DLF","VEDL","JIOFIN",
+  "PIDILITIND","AMBUJACEM","GAIL","IOC","BPCL","LICI","DMART"
+];
+const MAX_CHARTS = 12;
+
+/* ============ State ============ */
+const S = {
+  mode: "movers", count: 6, range: "1d", interval: "5m",
+  refreshSec: 60, watchlist: [], data: {}, timer: null, countdown: 0,
+  proxyMode: null // "local" | "corsproxy" | "allorigins"
+};
+
+/* ============ CORS-safe fetch: own Vercel proxy first, public proxies as fallback ============ */
+async function proxyFetch(yUrl) {
+  const tries = [];
+  if (S.proxyMode) tries.push(S.proxyMode);
+  for (const m of ["local", "corsproxy", "allorigins"]) if (!tries.includes(m)) tries.push(m);
+  let lastErr;
+  for (const m of tries) {
+    const u = m === "local" ? "/api/yahoo?url=" + encodeURIComponent(yUrl)
+          : m === "corsproxy" ? "https://corsproxy.io/?url=" + encodeURIComponent(yUrl)
+          : "https://api.allorigins.win/raw?url=" + encodeURIComponent(yUrl);
+    try {
+      const r = await fetch(u, { cache: "no-store" });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const j = await r.json();
+      S.proxyMode = m;
+      return j;
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error("All fetch routes failed");
+}
+
+/* ============ Yahoo endpoints ============ */
+const ySym = s => encodeURIComponent(s.includes(".") ? s : s + ".NS");
+
+async function fetchSparkBatch(symbols, range, interval) {
+  // Try batch spark endpoint (1 request for all symbols)
+  const url = `https://query1.finance.yahoo.com/v8/finance/spark?symbols=${symbols.map(ySym).join(",")}&range=${range}&interval=${interval}&includePrePost=false`;
+  const j = await proxyFetch(url);
+  const out = {};
+  const results = (j.spark && j.spark.result) || j.result || null;
+  if (Array.isArray(results)) {
+    for (const item of results) {
+      const resp = item.response && item.response[0];
+      if (resp) out[cleanSym(item.symbol)] = parseChart(resp);
+    }
+  } else if (j && typeof j === "object" && !j.chart) {
+    // legacy shape: { "TCS.NS": {symbol, timestamp, close, previousClose, ...} }
+    for (const k of Object.keys(j)) {
+      const v = j[k];
+      if (v && Array.isArray(v.close)) {
+        out[cleanSym(k)] = { closes: v.close.filter(x => x != null), ts: v.timestamp || [],
+          prevClose: v.previousClose ?? v.chartPreviousClose, last: lastNum(v.close), name: k };
+      }
+    }
+  }
+  if (!Object.keys(out).length) throw new Error("spark parse failed");
+  return out;
+}
+
+async function fetchChartsIndividually(symbols, range, interval) {
+  const out = {};
+  const chunks = [];
+  for (let i = 0; i < symbols.length; i += 8) chunks.push(symbols.slice(i, i + 8));
+  for (const chunk of chunks) {
+    await Promise.all(chunk.map(async s => {
+      try {
+        const j = await proxyFetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ySym(s)}?range=${range}&interval=${interval}&includePrePost=false`);
+        const r = j.chart && j.chart.result && j.chart.result[0];
+        if (r) out[cleanSym(s)] = parseChart(r);
+      } catch (e) { /* skip symbol */ }
+    }));
+  }
+  if (!Object.keys(out).length) throw new Error("no data");
+  return out;
+}
+
+function parseChart(r) {
+  const meta = r.meta || {};
+  const closesRaw = (r.indicators && r.indicators.quote && r.indicators.quote[0] && r.indicators.quote[0].close)
+                 || (r.indicators && r.indicators.adjclose && r.indicators.adjclose[0] && r.indicators.adjclose[0].close) || [];
+  const ts = r.timestamp || [];
+  const pts = [], pts_ts = [];
+  for (let i = 0; i < closesRaw.length; i++) if (closesRaw[i] != null) { pts.push(closesRaw[i]); pts_ts.push(ts[i]); }
+  return {
+    closes: pts, ts: pts_ts,
+    prevClose: meta.chartPreviousClose ?? meta.previousClose ?? (pts.length ? pts[0] : null),
+    last: meta.regularMarketPrice ?? (pts.length ? pts[pts.length - 1] : null),
+    name: meta.shortName || meta.longName || cleanSym(meta.symbol || ""),
+    high: meta.regularMarketDayHigh, low: meta.regularMarketDayLow,
+    currency: meta.currency || "INR"
+  };
+}
+
+const cleanSym = s => (s || "").replace(/\.NS$|\.BO$/, "");
+const lastNum = arr => { for (let i = arr.length - 1; i >= 0; i--) if (arr[i] != null) return arr[i]; return null; };
+
+/* ============ Data refresh ============ */
+async function refresh() {
+  const symbols = S.mode === "watchlist" ? S.watchlist : UNIVERSE;
+  if (!symbols.length) { showMsg("Add symbols to your watchlist above (comma-separated NSE symbols)."); return; }
+  setStatus('<span class="spin"></span>updating…');
+  try {
+    let data;
+    try { data = await fetchSparkBatch(symbols, S.range, S.interval); }
+    catch (e) { data = await fetchChartsIndividually(symbols, S.range, S.interval); }
+    S.data = data;
+    render();
+    setStatus("updated <b>" + new Date().toLocaleTimeString("en-IN", { hour12: false }) + "</b>");
+  } catch (e) {
+    console.error(e);
+    if (!Object.keys(S.data).length) showMsg("Could not load market data. Check your connection, or host with the included /api proxy (see README).", true);
+    setStatus('<span style="color:var(--red)">update failed — retrying</span>');
+  }
+}
+
+function ranked() {
+  const rows = Object.entries(S.data).map(([sym, d]) => {
+    const chg = d.prevClose && d.last ? (d.last - d.prevClose) / d.prevClose * 100 : 0;
+    return { sym, d, chg };
+  }).filter(r => r.d.closes.length > 1);
+  if (S.mode === "gainers") rows.sort((a, b) => b.chg - a.chg);
+  else if (S.mode === "losers") rows.sort((a, b) => a.chg - b.chg);
+  else if (S.mode === "movers") rows.sort((a, b) => Math.abs(b.chg) - Math.abs(a.chg));
+  else rows.sort((a, b) => S.watchlist.indexOf(a.sym) - S.watchlist.indexOf(b.sym));
+  return rows;
+}
+
+/* ============ Smart grid: pick cols for n charts ============ */
+function gridCols(n) {
+  return n <= 1 ? 1 : n <= 3 ? n : n === 4 ? 2 : n <= 6 ? 3 : n <= 8 ? 4 : n === 9 ? 3 : 4;
+}
+
+/* ============ Render ============ */
+function render() {
+  const rows = ranked();
+  const show = rows.slice(0, S.count);
+  const grid = document.getElementById("grid");
+  const msg = document.getElementById("msg");
+  msg.style.display = show.length ? "none" : "block";
+  grid.style.gridTemplateColumns = `repeat(${gridCols(show.length)}, 1fr)`;
+  grid.innerHTML = "";
+  for (const r of show) {
+    const up = r.chg >= 0;
+    const card = document.createElement("div");
+    card.className = "card";
+    const hiLo = (r.d.high && r.d.low) ? `L ${fmt(r.d.low)} · H ${fmt(r.d.high)}` : "";
+    card.innerHTML = `
+      <div class="card-head">
+        <span class="sym">${r.sym}</span>
+        <span class="name">${r.d.name || ""}</span>
+        <span class="px">₹${fmt(r.d.last)}</span>
+        <span class="chg ${up ? "up" : "down"}">${up ? "▲" : "▼"} ${Math.abs(r.chg).toFixed(2)}%</span>
+      </div>
+      <canvas></canvas>
+      <div class="card-foot"><span>${hiLo}</span><span>prev ₹${fmt(r.d.prevClose)}</span></div>`;
+    grid.appendChild(card);
+    drawSpark(card.querySelector("canvas"), r.d, up);
+  }
+  renderStrip(rows);
+}
+
+function fmt(x) { return x == null ? "–" : Number(x).toLocaleString("en-IN", { maximumFractionDigits: 2, minimumFractionDigits: x >= 1000 ? 0 : 2 }); }
+
+function renderStrip(rows) {
+  const strip = document.getElementById("strip");
+  const top = [...rows].sort((a, b) => b.chg - a.chg);
+  const picks = top.slice(0, 8).concat(top.slice(-8).reverse());
+  strip.innerHTML = picks.map(r =>
+    `<span class="chip"><span class="sym">${r.sym}</span><span class="chg ${r.chg >= 0 ? "up" : "down"}">${r.chg >= 0 ? "+" : ""}${r.chg.toFixed(2)}%</span></span>`
+  ).join("");
+}
+
+function drawSpark(canvas, d, up) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth || canvas.parentElement.clientWidth - 24;
+  const h = Math.max(canvas.clientHeight, 80);
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+  const pts = d.closes;
+  if (pts.length < 2) return;
+  let min = Math.min(...pts), max = Math.max(...pts);
+  if (d.prevClose != null) { min = Math.min(min, d.prevClose); max = Math.max(max, d.prevClose); }
+  const pad = (max - min) * 0.08 || max * 0.001 || 1;
+  min -= pad; max += pad;
+  const X = i => 2 + i / (pts.length - 1) * (w - 4);
+  const Y = v => h - 2 - (v - min) / (max - min) * (h - 4);
+  const color = up ? "#3fb950" : "#f85149";
+
+  // prev close dashed line
+  if (d.prevClose != null) {
+    ctx.strokeStyle = "#8b949e"; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(0, Y(d.prevClose)); ctx.lineTo(w, Y(d.prevClose)); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  // gradient fill
+  const g = ctx.createLinearGradient(0, 0, 0, h);
+  g.addColorStop(0, color + "55"); g.addColorStop(1, color + "00");
+  ctx.beginPath(); ctx.moveTo(X(0), Y(pts[0]));
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(X(i), Y(pts[i]));
+  ctx.lineTo(X(pts.length - 1), h); ctx.lineTo(X(0), h); ctx.closePath();
+  ctx.fillStyle = g; ctx.fill();
+  // price line
+  ctx.beginPath(); ctx.moveTo(X(0), Y(pts[0]));
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(X(i), Y(pts[i]));
+  ctx.strokeStyle = color; ctx.lineWidth = 1.6; ctx.lineJoin = "round"; ctx.stroke();
+  // last point
+  ctx.beginPath(); ctx.arc(X(pts.length - 1), Y(pts[pts.length - 1]), 2.5, 0, Math.PI * 2);
+  ctx.fillStyle = color; ctx.fill();
+}
+
+/* ============ Market status (NSE: 09:15–15:30 IST, Mon–Fri) ============ */
+function marketStatus() {
+  const now = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+  const day = now.getDay(), mins = now.getHours() * 60 + now.getMinutes();
+  const open = day >= 1 && day <= 5 && mins >= 555 && mins <= 930;
+  const b = document.getElementById("mktBadge");
+  b.textContent = open ? "● NSE OPEN" : "NSE CLOSED";
+  b.className = "badge" + (open ? " open" : "");
+}
+
+/* ============ UI wiring ============ */
+function showMsg(t, isErr) { const m = document.getElementById("msg"); m.style.display = "block"; m.className = isErr ? "error" : ""; m.textContent = t; document.getElementById("grid").innerHTML = ""; }
+function setStatus(html) { document.getElementById("status").innerHTML = html; }
+
+function schedule() {
+  clearInterval(S.timer);
+  S.timer = setInterval(() => { if (!document.hidden) refresh(); }, S.refreshSec * 1000);
+}
+
+function init() {
+  const countSel = document.getElementById("count");
+  for (let i = 1; i <= MAX_CHARTS; i++) countSel.add(new Option(i, i));
+  countSel.value = S.count;
+
+  document.getElementById("mode").onchange = e => {
+    S.mode = e.target.value;
+    document.getElementById("watchlistBox").style.display = S.mode === "watchlist" ? "flex" : "none";
+    S.data = {}; refresh();
+  };
+  countSel.onchange = e => { S.count = +e.target.value; render(); };
+  document.getElementById("range").onchange = e => {
+    [S.range, S.interval] = e.target.value.split("|");
+    S.data = {}; refresh();
+  };
+  document.getElementById("interval").onchange = e => { S.refreshSec = +e.target.value; schedule(); };
+  document.getElementById("watchlistInput").onchange = e => {
+    S.watchlist = e.target.value.split(/[,\s]+/).map(s => s.trim().toUpperCase()).filter(Boolean);
+    try { localStorage.setItem("mp_watchlist", S.watchlist.join(",")); } catch (_) {}
+    S.data = {}; refresh();
+  };
+  try {
+    const saved = localStorage.getItem("mp_watchlist");
+    if (saved) { S.watchlist = saved.split(","); document.getElementById("watchlistInput").value = saved.replace(/,/g, ", "); }
+  } catch (_) {}
+
+  window.addEventListener("resize", () => render());
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+
+  marketStatus(); setInterval(marketStatus, 30000);
+  refresh(); schedule();
+}
+init();
+</script>
+</body>
+</html>
