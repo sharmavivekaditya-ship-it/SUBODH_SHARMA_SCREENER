@@ -51,11 +51,15 @@ export default async function handler(req, res) {
   if (process.env.REFRESH_TOKEN && req.query.token !== process.env.REFRESH_TOKEN)
     return res.status(401).json({ error: "unauthorized" });
 
+  const trim = (d, keep = 160) => {   // last ~2 sessions: SMA50 lookback, small payload
+    const s = Math.max(0, d.t.length - keep);
+    return { ...d, t: d.t.slice(s), o: d.o.slice(s), h: d.h.slice(s), l: d.l.slice(s), c: d.c.slice(s), v: d.v.slice(s) };
+  };
   const daily = {}, intraday = {};
   await Promise.all(UNIVERSE.map(async s => {
-    const [d, i] = await Promise.all([yChart(s, "1y", "1d"), yChart(s, "1d", "5m")]);
+    const [d, i] = await Promise.all([yChart(s, "1y", "1d"), yChart(s, "5d", "5m")]);
     if (d) daily[s] = d;
-    if (i) intraday[s] = i;
+    if (i) intraday[s] = trim(i);
   }));
 
   const metrics = {};
