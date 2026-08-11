@@ -84,7 +84,29 @@
   #modalClose:hover { color: var(--text); }
   #modalChart { flex: 1; min-height: 0; }
 
-  @media (max-width: 900px) { #side { display: none; } body { overflow: auto; } }
+  /* ===== Insights view ===== */
+  #insights { flex: 1; overflow: auto; padding: 12px; display: none; }
+  .ins-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; max-width: 1250px; margin: 0 auto; }
+  .ins-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+  .ins-card h3 { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
+  .ins-card.wide { grid-column: 1 / -1; }
+  .bt { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 11px; }
+  .bt .lbl { width: 110px; color: var(--muted); flex: none; }
+  .bt .track { flex: 1; height: 14px; background: var(--bg); border-radius: 4px; overflow: hidden; }
+  .bt .fill { height: 100%; }
+  .bt .val { width: 84px; text-align: right; font-variant-numeric: tabular-nums; flex: none; }
+  .adbar { display: flex; height: 18px; border-radius: 4px; overflow: hidden; font-size: 10px; color: #fff; }
+  .hist { display: flex; align-items: flex-end; gap: 6px; height: 116px; margin-top: 8px; }
+  .hbin { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; font-size: 9px; color: var(--muted); gap: 3px; }
+  .hbin .bar { width: 100%; border-radius: 3px 3px 0 0; }
+  table.rot { width: 100%; border-collapse: collapse; font-size: 11px; font-variant-numeric: tabular-nums; }
+  .rot th { font-size: 9.5px; color: var(--muted); text-transform: uppercase; padding: 4px 6px; text-align: right; }
+  .rot th:first-child { text-align: left; }
+  .rot td { padding: 4px 6px; text-align: right; border-bottom: 1px solid #161b22; }
+  .rot td:first-child { text-align: left; font-weight: 600; }
+  .hilist { font-size: 11px; column-count: 2; column-gap: 30px; }
+  .hilist div { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid #161b22; break-inside: avoid; }
+  @media (max-width: 900px) { #side { display: none; } body { overflow: auto; } .ins-grid { grid-template-columns: 1fr; } .hilist { column-count: 1; } }
 </style>
 </head>
 <body>
@@ -92,6 +114,9 @@
 <div id="bar">
   <h1>MARKET<span>PULSE</span></h1>
   <span class="badge" id="mktBadge">…</span>
+  <div class="seg" id="viewSeg">
+    <button data-v="charts" class="on">CHARTS</button><button data-v="insights">INSIGHTS</button>
+  </div>
   <label class="ctl">
     <select id="mode">
       <option value="movers">Top Movers</option>
@@ -133,6 +158,7 @@
     <div id="msg"><span class="spin"></span>Loading market data…</div>
     <div id="grid"></div>
   </div>
+  <div id="insights"></div>
 </div>
 
 <div id="modal">
@@ -167,7 +193,7 @@ const S = {
   watchlist: [], timer: null, sortKey: "d1", sortDir: -1,
   metrics: {}, metricsTime: 0, charts: {}, rows: [],
   showVol: true, showS20: false, showS50: false,
-  apiOk: null, modalSym: null, snapIntraday: null, snapTime: 0
+  apiOk: null, modalSym: null, snapIntraday: null, snapTime: 0, view: "charts"
 };
 const pool = new Map();   // sym -> {chart, series...} reused across refreshes
 let modalChart = null;
@@ -231,11 +257,15 @@ async function loadMetrics(force) {
     if (cl.length < 2) continue;
     const last = d.meta.last ?? cl[cl.length - 1];
     const prev = cl[cl.length - 2]; // yesterday's close (meta.prevClose on a 1y range = a year ago!)
+    const smaN = n => cl.length >= n ? cl.slice(-n).reduce((a, b) => a + b, 0) / n : null;
+    const s20v = smaN(20), s50v = smaN(50), s200v = smaN(200);
     m[sym] = {
       sym, last, name: d.meta.name,
       d1: prev ? (last - prev) / prev * 100 : null,
-      w1: pctBack(cl, 5), m1: pctBack(cl, 21), m3: pctBack(cl, 63), m6: pctBack(cl, 126),
-      rsi: rsi14(cl)
+      w1: pctBack(cl, 5), m1: pctBack(cl, 21), m3: pctBack(cl, 63), m6: pctBack(cl, 126), y1: pctBack(cl, 251),
+      rsi: rsi14(cl),
+      a20: s20v != null ? last > s20v : null, a50: s50v != null ? last > s50v : null, a200: s200v != null ? last > s200v : null,
+      hi52: (last / Math.max(...cl) - 1) * 100
     };
   }
   if (!Object.keys(m).length) throw new Error("metrics failed");
@@ -304,6 +334,7 @@ async function refresh(force) {
     }
     S.charts = data;
     render(picks);
+    if (S.view === "insights") renderInsights();
     setStatus("updated <b>" + new Date().toLocaleTimeString("en-IN", { hour12: false }) + "</b>" + (S.apiOk ? "" : " · proxy mode"));
   } catch (e) {
     console.error(e);
@@ -466,6 +497,73 @@ function renderStrip() {
   document.querySelectorAll("#strip .chip").forEach(c => c.onclick = () => openModal(c.dataset.s));
 }
 
+/* ================= Insights view (Weekend Investing style breadth) ================= */
+const SECTORS = {
+  "Banks": ["HDFCBANK","ICICIBANK","SBIN","AXISBANK","KOTAKBANK","INDUSINDBK"],
+  "NBFC / Finance": ["BAJFINANCE","BAJAJFINSV","JIOFIN","SHRIRAMFIN","LICI","SBILIFE","HDFCLIFE"],
+  "IT": ["INFY","TCS","HCLTECH","WIPRO","TECHM"],
+  "Auto": ["MARUTI","M&M","TATAMOTORS","EICHERMOT","HEROMOTOCO","BAJAJ-AUTO"],
+  "Metals": ["TATASTEEL","JSWSTEEL","HINDALCO","VEDL"],
+  "Oil & Gas": ["RELIANCE","ONGC","IOC","BPCL","GAIL","COALINDIA"],
+  "Power": ["NTPC","POWERGRID"],
+  "FMCG": ["ITC","HINDUNILVR","NESTLEIND","BRITANNIA","TATACONSUM"],
+  "Consumer / Retail": ["TITAN","TRENT","DMART","ASIANPAINT","PIDILITIND"],
+  "Pharma / Health": ["SUNPHARMA","DRREDDY","CIPLA","APOLLOHOSP"],
+  "Infra / Cement": ["LT","ULTRACEMCO","GRASIM","AMBUJACEM","DLF","ADANIPORTS","ADANIENT"],
+  "Defence": ["BEL","HAL"],
+  "Telecom": ["BHARTIARTL"]
+};
+function heat(v) {
+  if (v == null) return "transparent";
+  const a = Math.min(Math.abs(v) / 12, 0.75) + 0.08;
+  return v >= 0 ? `rgba(38,166,154,${a})` : `rgba(239,83,80,${a})`;
+}
+function renderInsights() {
+  const ms = Object.values(S.metrics);
+  const el = document.getElementById("insights");
+  if (!ms.length) { el.innerHTML = '<div id="msg"><span class="spin"></span>Loading…</div>'; return; }
+  const n = ms.length;
+  const cnt = k => ms.filter(m => m[k] === true).length;
+  const hasB = ms.some(m => m.a20 != null);
+  const adv = ms.filter(m => (m.d1 ?? 0) > 0).length, dec = ms.filter(m => (m.d1 ?? 0) < 0).length;
+  const bar = (lbl, c) => `<div class="bt"><span class="lbl">${lbl}</span><div class="track"><div class="fill" style="width:${(c / n * 100).toFixed(0)}%;background:${c / n >= .5 ? "var(--green)" : "var(--red)"}"></div></div><span class="val">${c}/${n} · ${(c / n * 100).toFixed(0)}%</span></div>`;
+
+  const bins = [[-1e9,-10],[-10,-5],[-5,0],[0,5],[5,10],[10,1e9]], labels = ["<-10%","-10:-5","-5:0","0:+5","+5:+10",">+10%"];
+  const bc = bins.map(([a, b]) => ms.filter(m => m.m1 != null && m.m1 > a && m.m1 <= b).length);
+  const bmax = Math.max(...bc, 1);
+  const hist = bc.map((c, i) => `<div class="hbin"><span>${c}</span><div class="bar" style="height:${Math.max(c / bmax * 84, 2).toFixed(0)}px;background:${i < 3 ? "var(--red)" : "var(--green)"};opacity:.85"></div><span>${labels[i]}</span></div>`).join("");
+
+  const avg = a => { const v = a.filter(x => x != null); return v.length ? v.reduce((x, y) => x + y, 0) / v.length : null; };
+  const rows = Object.entries(SECTORS).map(([sec, list]) => {
+    const mm = list.map(s => S.metrics[s]).filter(Boolean);
+    if (!mm.length) return null;
+    return { sec, cnt: mm.length, d1: avg(mm.map(m => m.d1)), w1: avg(mm.map(m => m.w1)), m1: avg(mm.map(m => m.m1)),
+             m3: avg(mm.map(m => m.m3)), m6: avg(mm.map(m => m.m6)), y1: avg(mm.map(m => m.y1)) };
+  }).filter(Boolean).sort((a, b) => (b.m1 ?? -99) - (a.m1 ?? -99));
+  const cell = v => `<td style="background:${heat(v)}">${v == null ? "–" : (v >= 0 ? "+" : "") + v.toFixed(1) + "%"}</td>`;
+  const rot = rows.map(r => `<tr><td>${r.sec} <span style="color:var(--muted);font-weight:400">(${r.cnt})</span></td>${cell(r.d1)}${cell(r.w1)}${cell(r.m1)}${cell(r.m3)}${cell(r.m6)}${cell(r.y1)}</tr>`).join("");
+
+  const withHi = ms.filter(m => m.hi52 != null);
+  const near = withHi.filter(m => m.hi52 >= -5).length;
+  const top = [...withHi].sort((a, b) => b.hi52 - a.hi52).slice(0, 12);
+  const hiRows = top.map(m => `<div><span>${m.sym}</span><span class="${m.hi52 >= -2 ? "up" : ""}">${m.hi52.toFixed(1)}%</span></div>`).join("");
+
+  el.innerHTML = `<div class="ins-grid">
+    <div class="ins-card"><h3>Market Breadth — trend health</h3>
+      ${hasB ? bar("Above 20 DMA", cnt("a20")) + bar("Above 50 DMA", cnt("a50")) + bar("Above 200 DMA", cnt("a200"))
+             : '<div style="color:var(--muted);font-size:11px;margin-bottom:8px">DMA breadth appears after the next data refresh.</div>'}
+      <div style="margin-top:12px" class="bt"><span class="lbl">Adv / Decline</span><div class="adbar" style="flex:1"><div style="background:var(--green);width:${(adv / (adv + dec || 1) * 100).toFixed(0)}%;display:flex;align-items:center;padding-left:6px">${adv}</div><div style="background:var(--red);flex:1;display:flex;align-items:center;justify-content:flex-end;padding-right:6px">${dec}</div></div><span class="val"></span></div>
+    </div>
+    <div class="ins-card"><h3>1-Month Return Distribution</h3><div class="hist">${hist}</div>
+      <div style="margin-top:10px;font-size:11px;color:var(--muted)"><b style="color:var(--text)">${near}</b> of ${withHi.length} stocks within 5% of their 52-week high</div>
+    </div>
+    <div class="ins-card wide"><h3>Sector Rotation — average returns, ranked by 1M</h3>
+      <table class="rot"><thead><tr><th>Sector</th><th>1D</th><th>1W</th><th>1M</th><th>3M</th><th>6M</th><th>1Y</th></tr></thead><tbody>${rot}</tbody></table>
+    </div>
+    <div class="ins-card wide"><h3>Distance from 52-Week High — momentum leaders</h3><div class="hilist">${hiRows}</div></div>
+  </div>`;
+}
+
 /* ================= Fullscreen modal ================= */
 async function openModal(sym) {
   S.modalSym = sym;
@@ -525,6 +623,14 @@ function init() {
   for (let i = 1; i <= MAX_CHARTS; i++) countSel.add(new Option(i, i));
   countSel.value = S.count;
 
+  document.querySelectorAll("#viewSeg button").forEach(b => b.onclick = () => {
+    document.querySelectorAll("#viewSeg button").forEach(x => x.classList.remove("on"));
+    b.classList.add("on");
+    S.view = b.dataset.v;
+    document.getElementById("gridWrap").style.display = S.view === "charts" ? "block" : "none";
+    document.getElementById("insights").style.display = S.view === "insights" ? "block" : "none";
+    if (S.view === "insights") renderInsights(); else render(chartPicks(S.rows));
+  });
   document.getElementById("mode").onchange = e => {
     S.mode = e.target.value;
     document.getElementById("watchlistBox").style.display = S.mode === "watchlist" ? "flex" : "none";

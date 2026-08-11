@@ -69,11 +69,15 @@ export default async function handler(req, res) {
     if (cl.length < 2) continue;
     const last = d.meta.last ?? cl[cl.length - 1];
     const prev = cl[cl.length - 2]; // yesterday's close (meta.prevClose on a 1y range = a year ago!)
+    const smaN = n => cl.length >= n ? cl.slice(-n).reduce((a, b) => a + b, 0) / n : null;
+    const s20v = smaN(20), s50v = smaN(50), s200v = smaN(200);
     metrics[sym] = {
       sym, last, name: d.meta.name,
       d1: prev ? (last - prev) / prev * 100 : null,
-      w1: pctBack(cl, 5), m1: pctBack(cl, 21), m3: pctBack(cl, 63), m6: pctBack(cl, 126),
-      rsi: rsi14(cl)
+      w1: pctBack(cl, 5), m1: pctBack(cl, 21), m3: pctBack(cl, 63), m6: pctBack(cl, 126), y1: pctBack(cl, 251),
+      rsi: rsi14(cl),
+      a20: s20v != null ? last > s20v : null, a50: s50v != null ? last > s50v : null, a200: s200v != null ? last > s200v : null,
+      hi52: (last / Math.max(...cl) - 1) * 100
     };
   }
 
