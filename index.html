@@ -46,7 +46,7 @@
 
   /* ===== Main: sidebar + chart grid ===== */
   #main { flex: 1; display: flex; min-height: 0; }
-  #side { width: 355px; flex: none; background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
+  #side { width: 405px; flex: none; background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
   #side h2 { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); padding: 8px 12px 4px; }
   #tblWrap { flex: 1; overflow-y: auto; scrollbar-width: thin; }
   table { width: 100%; border-collapse: collapse; font-size: 11px; font-variant-numeric: tabular-nums; }
@@ -58,6 +58,11 @@
   tbody tr { cursor: pointer; }
   tbody tr:hover { background: var(--hl); }
   tbody tr.live td:first-child { border-left: 2px solid var(--accent); padding-left: 10px; }
+  .tag { font-style: normal; font-size: 8.5px; font-weight: 700; padding: 1px 4px; border-radius: 3px; margin-left: 3px; letter-spacing: .3px; }
+  .tag.vcp { background: #2962ff33; color: #6ea3ff; }
+  .tag.htf { background: #9b59b633; color: #c39bd3; }
+  .tag.pb  { background: #e67e2233; color: #f0b27a; }
+  .ctags .tag { font-size: 9px; }
 
   #gridWrap { flex: 1; overflow: auto; padding: 10px; }
   #grid { display: grid; gap: 8px; justify-content: center; align-content: start; }
@@ -135,6 +140,7 @@
   <label class="ctl">⟳ <select id="interval">
     <option value="30">30s</option><option value="60" selected>60s</option><option value="120">2m</option><option value="300">5m</option>
   </select></label>
+  <button class="tgl" id="btnReport" title="Generate printable daily report">REPORT</button>
   <span class="ctl" id="watchlistBox"><input type="text" id="watchlistInput" placeholder="RELIANCE, TCS, HDFCBANK…"></span>
   <span id="status"></span>
 </div>
@@ -148,7 +154,7 @@
       <table>
         <thead><tr id="thRow">
           <th data-k="sym">Symbol</th><th data-k="last">LTP</th><th data-k="d1" class="sorted">1D%</th>
-          <th data-k="w1">1W%</th><th data-k="m1">1M%</th><th data-k="m3">3M%</th><th data-k="rsi">RSI</th>
+          <th data-k="w1">1W%</th><th data-k="m1">1M%</th><th data-k="m3">3M%</th><th data-k="rsi">RSI</th><th data-k="setupScore">Setup</th>
         </tr></thead>
         <tbody id="tbody"></tbody>
       </table>
@@ -246,14 +252,53 @@ function rsi14(cl) {
 }
 const pctBack = (cl, n) => cl.length > n ? (cl[cl.length - 1] - cl[cl.length - 1 - n]) / cl[cl.length - 1 - n] * 100 : null;
 
+/* Setup candidates (heuristic): VCP, High Tight Flag, Pullback + ADR% & avg turnover */
+function setupExtras(cl, hi, lo, vo) {
+  const n = cl.length;
+  const out = { vcp: false, htf: false, pb: false, adr: null, tov: null, setupScore: 0 };
+  if (n < 25) return out;
+  const last = cl[n - 1];
+  const sma = (a, p) => a.length >= p ? a.slice(-p).reduce((x, y) => x + y, 0) / p : null;
+  let s = 0, t = 0;
+  for (let i = n - 20; i < n; i++) { s += (hi[i] - lo[i]) / cl[i]; t += vo[i] * cl[i]; }
+  out.adr = s / 20 * 100;
+  out.tov = t / 20 / 1e7;              // avg daily turnover, ₹ crore
+  if (n < 60) return out;
+  const s20 = sma(cl, 20), s50 = sma(cl, 50), s200 = n >= 200 ? sma(cl, 200) : null;
+  const off52 = (last / Math.max(...cl) - 1) * 100;
+  const trp = (a, b) => { let x = 0, c = 0; for (let i = n - a; i < n - b; i++) { x += (hi[i] - lo[i]) / cl[i]; c++; } return x / c * 100; };
+  const atrR = trp(10, 0), atrP = trp(30, 10);
+  const cl10 = cl.slice(-10);
+  const range10 = (Math.max(...cl10) - Math.min(...cl10)) / last * 100;
+  const v10 = sma(vo, 10), v50 = sma(vo, 50);
+  // VCP: uptrend near highs, volatility contracting, volume drying up, tight range
+  out.vcp = !!(s200 != null && last > s50 && s50 > s200 && off52 >= -20 &&
+               atrR < atrP * 0.75 && v10 < v50 && range10 < 9);
+  // HTF: ≥40% run-up in ~2 months, then tight flag near highs
+  const base = cl.slice(-50, -10);
+  const runGain = base.length ? (Math.max(...cl.slice(-15)) - Math.min(...base)) / Math.min(...base) * 100 : 0;
+  out.htf = !!(runGain >= 40 && off52 >= -15 && range10 < 12);
+  // Pullback: uptrend retracing 3-12% onto 20/50 DMA with cooled RSI
+  const dd = (last / Math.max(...cl.slice(-20)) - 1) * 100;
+  const nearMA = (s20 && Math.abs(last - s20) / s20 < 0.03) || (s50 && Math.abs(last - s50) / s50 < 0.035);
+  const r = rsi14(cl);
+  out.pb = !!(s200 != null && last > s200 && s50 > s200 && dd <= -3 && dd >= -12 && nearMA && r >= 35 && r <= 60);
+  out.setupScore = (out.vcp ? 4 : 0) + (out.htf ? 2 : 0) + (out.pb ? 1 : 0);
+  return out;
+}
+const tagsHtml = (m, dash) =>
+  ((m.vcp ? '<i class="tag vcp">VCP</i>' : "") + (m.htf ? '<i class="tag htf">HTF</i>' : "") + (m.pb ? '<i class="tag pb">PB</i>' : "")) || (dash ? "–" : "");
+
 async function loadMetrics(force) {
   const symbols = S.mode === "watchlist" && S.watchlist.length ? S.watchlist : UNIVERSE;
   if (!force && Object.keys(S.metrics).length && Date.now() - S.metricsTime < METRICS_TTL) return;
   const data = await apiMarket(symbols, "1y", "1d");
   const m = {};
   for (const [sym, d] of Object.entries(data)) {
-    const cl = [];
-    for (let i = 0; i < d.c.length; i++) if (d.c[i] != null) cl.push(d.c[i]);
+    const cl = [], hh = [], ll = [], vv = [];
+    for (let i = 0; i < d.c.length; i++) if (d.c[i] != null) {
+      cl.push(d.c[i]); hh.push(d.h[i] ?? d.c[i]); ll.push(d.l[i] ?? d.c[i]); vv.push(d.v[i] || 0);
+    }
     if (cl.length < 2) continue;
     const last = d.meta.last ?? cl[cl.length - 1];
     const prev = cl[cl.length - 2]; // yesterday's close (meta.prevClose on a 1y range = a year ago!)
@@ -265,7 +310,8 @@ async function loadMetrics(force) {
       w1: pctBack(cl, 5), m1: pctBack(cl, 21), m3: pctBack(cl, 63), m6: pctBack(cl, 126), y1: pctBack(cl, 251),
       rsi: rsi14(cl),
       a20: s20v != null ? last > s20v : null, a50: s50v != null ? last > s50v : null, a200: s200v != null ? last > s200v : null,
-      hi52: (last / Math.max(...cl) - 1) * 100
+      hi52: (last / Math.max(...cl) - 1) * 100,
+      ...setupExtras(cl, hh, ll, vv)
     };
   }
   if (!Object.keys(m).length) throw new Error("metrics failed");
@@ -455,7 +501,7 @@ function render(picks) {
     if (!obj) {
       const wrap = document.createElement("div");
       wrap.className = "card";
-      wrap.innerHTML = `<div class="card-head"><span class="sym"></span><span class="px"></span><span class="chg"></span><button class="max" title="Expand">⤢</button></div><div class="chart-el"></div>`;
+      wrap.innerHTML = `<div class="card-head"><span class="sym"></span><span class="ctags"></span><span class="px"></span><span class="chg"></span><button class="max" title="Expand">⤢</button></div><div class="chart-el"></div>`;
       grid.appendChild(wrap);
       obj = buildChart(wrap.querySelector(".chart-el"), cellW - 2, chartH);
       obj.wrap = wrap;
@@ -465,6 +511,7 @@ function render(picks) {
     }
     grid.appendChild(obj.wrap); // keeps ranking order
     obj.wrap.querySelector(".sym").textContent = p.sym;
+    obj.wrap.querySelector(".ctags").innerHTML = S.metrics[p.sym] ? tagsHtml(S.metrics[p.sym], false) : "";
     obj.wrap.querySelector(".px").textContent = "₹" + fmt(d.meta.last);
     const ce = obj.wrap.querySelector(".chg");
     ce.textContent = (chg >= 0 ? "▲" : "▼") + Math.abs(chg ?? 0).toFixed(2) + "%";
@@ -484,7 +531,7 @@ function renderTable(liveSet) {
       <td>${r.sym}</td><td>${fmt(r.last)}</td>
       <td class="${cls(r.d1)}">${pc(r.d1)}</td><td class="${cls(r.w1)}">${pc(r.w1)}</td>
       <td class="${cls(r.m1)}">${pc(r.m1)}</td><td class="${cls(r.m3)}">${pc(r.m3)}</td>
-      <td>${r.rsi == null ? "–" : r.rsi.toFixed(0)}</td>
+      <td>${r.rsi == null ? "–" : r.rsi.toFixed(0)}</td><td>${tagsHtml(r, true)}</td>
     </tr>`).join("");
   tb.querySelectorAll("tr").forEach(tr => tr.onclick = () => openModal(tr.dataset.s));
 }
@@ -605,6 +652,56 @@ function closeModal() {
   if (modalChart) { modalChart.chart.remove(); modalChart = null; document.getElementById("modalChart").innerHTML = ""; }
 }
 
+/* ================= Daily report (doc point 8) ================= */
+function buildReport() {
+  const ms = Object.values(S.metrics);
+  if (!ms.length) return;
+  const dt = new Date().toLocaleDateString("en-IN", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+  const n = ms.length;
+  const adv = ms.filter(m => (m.d1 ?? 0) > 0).length, dec = ms.filter(m => (m.d1 ?? 0) < 0).length;
+  const cnt = k => ms.filter(m => m[k] === true).length;
+  const P = v => v == null ? "–" : (v >= 0 ? "+" : "") + v.toFixed(2) + "%";
+  const F = v => v == null ? "–" : Number(v).toLocaleString("en-IN", { maximumFractionDigits: 2 });
+  const setupTxt = m => [m.vcp && "VCP", m.htf && "HTF", m.pb && "PB"].filter(Boolean).join(" ") || "";
+  const col = v => v == null ? "" : v >= 0 ? "color:#0a7d5c" : "color:#c0392b";
+  const row = m => `<tr><td><b>${m.sym}</b></td><td style="text-align:right">${F(m.last)}</td><td style="text-align:right;${col(m.d1)}">${P(m.d1)}</td><td style="text-align:right;${col(m.m1)}">${P(m.m1)}</td><td style="text-align:right">${m.rsi == null ? "–" : m.rsi.toFixed(0)}</td><td style="text-align:right">${m.adr == null ? "–" : m.adr.toFixed(1) + "%"}</td><td style="text-align:right">${m.tov == null ? "–" : "₹" + F(Math.round(m.tov)) + " cr"}</td><td>${setupTxt(m)}</td></tr>`;
+  const head = `<tr><th style="text-align:left">Symbol</th><th>LTP</th><th>1D%</th><th>1M%</th><th>RSI</th><th>ADR%</th><th>Avg T/O</th><th style="text-align:left">Setup</th></tr>`;
+  const by = k => [...ms].sort((a, b) => (b[k] ?? -99) - (a[k] ?? -99));
+  const gain = by("d1").slice(0, 10), lose = by("d1").slice(-10).reverse();
+  const avg = a => { const v = a.filter(x => x != null); return v.length ? v.reduce((x, y) => x + y, 0) / v.length : null; };
+  const secRows = Object.entries(SECTORS).map(([sec, list]) => {
+    const mm = list.map(s => S.metrics[s]).filter(Boolean);
+    if (!mm.length) return null;
+    return { sec, d1: avg(mm.map(m => m.d1)), w1: avg(mm.map(m => m.w1)), m1: avg(mm.map(m => m.m1)), m3: avg(mm.map(m => m.m3)), m6: avg(mm.map(m => m.m6)), y1: avg(mm.map(m => m.y1)) };
+  }).filter(Boolean).sort((a, b) => (b.m1 ?? -99) - (a.m1 ?? -99));
+  const secHtml = secRows.map(r => `<tr><td><b>${r.sec}</b></td>${[r.d1, r.w1, r.m1, r.m3, r.m6, r.y1].map(v => `<td style="text-align:right;${col(v)}">${P(v)}</td>`).join("")}</tr>`).join("");
+  const setups = k => ms.filter(m => m[k]).map(m => m.sym).join(", ") || "none today";
+  const near = ms.filter(m => m.hi52 != null && m.hi52 >= -5).sort((a, b) => b.hi52 - a.hi52).map(m => m.sym).join(", ") || "none";
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Daily Market Report — ${dt}</title>
+<style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;color:#1a1a2e;max-width:900px;margin:24px auto;padding:0 16px;font-size:13px}
+h1{font-size:20px;margin-bottom:2px}h2{font-size:14px;margin:22px 0 8px;border-bottom:2px solid #1a1a2e;padding-bottom:3px}
+table{width:100%;border-collapse:collapse;font-size:12px}th{background:#f0f0f5;padding:5px 7px;text-align:right;font-size:10.5px;text-transform:uppercase}
+td{padding:4px 7px;border-bottom:1px solid #e8e8ee}.sub{color:#666;font-size:12px}.stat{display:inline-block;margin-right:24px}
+.stat b{font-size:17px}@media print{body{margin:8px auto}}</style></head><body>
+<h1>Daily Market Report</h1><div class="sub">${dt} · NSE F&amp;O universe (${n} stocks) · Generated by Market Pulse Pro</div>
+<h2>Market Summary</h2>
+<span class="stat"><b>${adv}</b> advancing</span><span class="stat"><b>${dec}</b> declining</span>
+<span class="stat"><b>${(cnt("a20") / n * 100).toFixed(0)}%</b> above 20 DMA</span>
+<span class="stat"><b>${(cnt("a50") / n * 100).toFixed(0)}%</b> above 50 DMA</span>
+<span class="stat"><b>${(cnt("a200") / n * 100).toFixed(0)}%</b> above 200 DMA</span>
+<h2>Top 10 Gainers</h2><table>${head}${gain.map(row).join("")}</table>
+<h2>Top 10 Losers</h2><table>${head}${lose.map(row).join("")}</table>
+<h2>Sector Rotation (avg returns, ranked by 1M)</h2>
+<table><tr><th style="text-align:left">Sector</th><th>1D</th><th>1W</th><th>1M</th><th>3M</th><th>6M</th><th>1Y</th></tr>${secHtml}</table>
+<h2>Setup Candidates (heuristic — verify on charts)</h2>
+<p><b>VCP:</b> ${setups("vcp")}<br><b>High Tight Flag:</b> ${setups("htf")}<br><b>Pullback:</b> ${setups("pb")}</p>
+<h2>Within 5% of 52-Week High</h2><p>${near}</p>
+<p class="sub">Data: Yahoo Finance (~15 min delayed). Not investment advice.</p>
+<script>window.onload=()=>setTimeout(()=>window.print(),400)<\/script></body></html>`;
+  const w = window.open("about:blank");
+  if (w) { w.document.write(html); w.document.close(); }
+}
+
 /* ================= Market status ================= */
 function marketStatus() {
   const now = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
@@ -663,6 +760,7 @@ function init() {
     document.querySelectorAll("#thRow th").forEach(x => x.classList.toggle("sorted", x === th));
     S.rows = rankedRows(); renderTable(new Set([...pool.keys()]));
   });
+  document.getElementById("btnReport").onclick = buildReport;
   document.getElementById("modalClose").onclick = closeModal;
   document.getElementById("modal").onclick = e => { if (e.target.id === "modal") closeModal(); };
   document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });

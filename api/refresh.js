@@ -47,6 +47,36 @@ function rsi14(cl) {
 }
 const pctBack = (cl, n) => cl.length > n ? (cl[cl.length - 1] - cl[cl.length - 1 - n]) / cl[cl.length - 1 - n] * 100 : null;
 
+function setupExtras(cl, hi, lo, vo) {
+  const n = cl.length;
+  const out = { vcp: false, htf: false, pb: false, adr: null, tov: null, setupScore: 0 };
+  if (n < 25) return out;
+  const last = cl[n - 1];
+  const sma = (a, p) => a.length >= p ? a.slice(-p).reduce((x, y) => x + y, 0) / p : null;
+  let s = 0, t = 0;
+  for (let i = n - 20; i < n; i++) { s += (hi[i] - lo[i]) / cl[i]; t += vo[i] * cl[i]; }
+  out.adr = s / 20 * 100;
+  out.tov = t / 20 / 1e7;
+  if (n < 60) return out;
+  const s20 = sma(cl, 20), s50 = sma(cl, 50), s200 = n >= 200 ? sma(cl, 200) : null;
+  const off52 = (last / Math.max(...cl) - 1) * 100;
+  const trp = (a, b) => { let x = 0, c = 0; for (let i = n - a; i < n - b; i++) { x += (hi[i] - lo[i]) / cl[i]; c++; } return x / c * 100; };
+  const atrR = trp(10, 0), atrP = trp(30, 10);
+  const cl10 = cl.slice(-10);
+  const range10 = (Math.max(...cl10) - Math.min(...cl10)) / last * 100;
+  const v10 = sma(vo, 10), v50 = sma(vo, 50);
+  out.vcp = !!(s200 != null && last > s50 && s50 > s200 && off52 >= -20 && atrR < atrP * 0.75 && v10 < v50 && range10 < 9);
+  const base = cl.slice(-50, -10);
+  const runGain = base.length ? (Math.max(...cl.slice(-15)) - Math.min(...base)) / Math.min(...base) * 100 : 0;
+  out.htf = !!(runGain >= 40 && off52 >= -15 && range10 < 12);
+  const dd = (last / Math.max(...cl.slice(-20)) - 1) * 100;
+  const nearMA = (s20 && Math.abs(last - s20) / s20 < 0.03) || (s50 && Math.abs(last - s50) / s50 < 0.035);
+  const r = rsi14(cl);
+  out.pb = !!(s200 != null && last > s200 && s50 > s200 && dd <= -3 && dd >= -12 && nearMA && r >= 35 && r <= 60);
+  out.setupScore = (out.vcp ? 4 : 0) + (out.htf ? 2 : 0) + (out.pb ? 1 : 0);
+  return out;
+}
+
 export default async function handler(req, res) {
   if (process.env.REFRESH_TOKEN && req.query.token !== process.env.REFRESH_TOKEN)
     return res.status(401).json({ error: "unauthorized" });
@@ -64,8 +94,10 @@ export default async function handler(req, res) {
 
   const metrics = {};
   for (const [sym, d] of Object.entries(daily)) {
-    const cl = [];
-    for (let i = 0; i < d.c.length; i++) if (d.c[i] != null) cl.push(d.c[i]);
+    const cl = [], hh = [], ll = [], vv = [];
+    for (let i = 0; i < d.c.length; i++) if (d.c[i] != null) {
+      cl.push(d.c[i]); hh.push(d.h[i] ?? d.c[i]); ll.push(d.l[i] ?? d.c[i]); vv.push(d.v[i] || 0);
+    }
     if (cl.length < 2) continue;
     const last = d.meta.last ?? cl[cl.length - 1];
     const prev = cl[cl.length - 2]; // yesterday's close (meta.prevClose on a 1y range = a year ago!)
@@ -77,7 +109,8 @@ export default async function handler(req, res) {
       w1: pctBack(cl, 5), m1: pctBack(cl, 21), m3: pctBack(cl, 63), m6: pctBack(cl, 126), y1: pctBack(cl, 251),
       rsi: rsi14(cl),
       a20: s20v != null ? last > s20v : null, a50: s50v != null ? last > s50v : null, a200: s200v != null ? last > s200v : null,
-      hi52: (last / Math.max(...cl) - 1) * 100
+      hi52: (last / Math.max(...cl) - 1) * 100,
+      ...setupExtras(cl, hh, ll, vv)
     };
   }
 
