@@ -157,7 +157,7 @@
     <div id="tblWrap">
       <table>
         <thead><tr id="thRow">
-          <th>#</th><th>Symbol</th><th>Momo</th><th>LTP</th><th>1D%</th><th>ATR%</th><th id="thQty">Lots</th><th>Status</th>
+          <th>#</th><th>Symbol</th><th>Momo</th><th>RS</th><th>LTP</th><th>ATR%</th><th id="thQty">Lots</th><th>Status</th>
         </tr></thead>
         <tbody id="tbody"></tbody>
       </table>
@@ -217,6 +217,20 @@ async function loadUniverse() {
 }
 const MAX_CHARTS = 12, METRICS_TTL = 4 * 60 * 1000, IST_OFF = 19800;
 const MAX_POSITIONS = 15;   // funds are deployed into the top 15 names only
+// Relative strength: recency-weighted blend of 1M / 3M / 6M growth, then
+// percentile-ranked 1-99 across the whole universe (so it is genuinely *relative*).
+const RS_W = { m1: 0.5, m3: 0.3, m6: 0.2 };
+
+function rsRawOf(m) {
+  let s = 0, w = 0;
+  for (const k of ["m1", "m3", "m6"]) if (m[k] != null) { s += m[k] * RS_W[k]; w += RS_W[k]; }
+  return w > 0 ? s / w : null;                 // renormalised if a window is missing
+}
+function assignRS(metrics) {
+  const arr = Object.values(metrics).filter(m => m.rsRaw != null).sort((a, b) => a.rsRaw - b.rsRaw);
+  const n = arr.length;
+  arr.forEach((m, i) => { m.rs = n > 1 ? Math.round(i / (n - 1) * 98) + 1 : 50; });
+}
 
 const S = {
   count: 6, range: "5d", interval: "5m", clip: true, refreshSec: 60, timer: null,
@@ -378,8 +392,10 @@ async function loadMetrics(force) {
       ...setupExtras(cl, hh, ll, vv),
       ...momoExtras(cl, hh, ll, oo)
     };
+    m[sym].rsRaw = rsRawOf(m[sym]);
   }
   if (!Object.keys(m).length) throw new Error("metrics failed");
+  assignRS(m);
   S.metrics = m; S.metricsTime = Date.now();
   try { localStorage.setItem("mp_metrics", JSON.stringify({ m, t: Date.now() })) } catch (_) {}
 }
@@ -456,13 +472,14 @@ function computePortfolio(basket) {
     holdings.push(h);
   }
   if (!isFno) free = ownFree;
-  const avgAtrPct = notional > 0
-    ? holdings.reduce((s, h) => s + h.atrPct * h.notional, 0) / notional : null;
+  const wavg = f => notional > 0 ? holdings.reduce((s, h) => s + (f(h) || 0) * h.notional, 0) / notional : null;
+  const avgAtrPct = wavg(h => h.atrPct);
+  const avgRS = holdings.some(h => h.rs != null) ? wavg(h => h.rs) : null;
   const held = new Set(holdings.map(h => h.sym));
   const rankedOut = ranked.map((m, i) => ({ ...m, rank: i + 1, hold: held.has(m.sym) }));
   return {
     basket: b, label: BASKET_LABEL[b], ranked: rankedOut, holdings, topN, av, isFno, skipped,
-    budget, cash: free, deployed: budget - free, notional, margin, avgAtrPct,
+    budget, cash: free, deployed: budget - free, notional, margin, avgAtrPct, avgRS,
     invested: budget - free, maxLev, maxPos: MAX_POSITIONS,
     ownFree: isFno ? av - margin : ownFree,
     grossLev: notional / av
@@ -669,8 +686,9 @@ function renderTable(liveSet) {
              : '<span style="color:var(--muted)">–</span>';
     return `<tr data-s="${r.sym}" class="${liveSet && liveSet.has(r.sym) ? "live" : ""}">
       <td style="color:var(--muted)">${r.rank}</td><td>${r.sym}</td>
-      <td>${r.momo == null ? "–" : r.momo.toFixed(1)}</td><td>${fmt(r.last)}</td>
-      <td class="${cls(r.d1)}">${pc(r.d1)}</td>
+      <td>${r.momo == null ? "–" : r.momo.toFixed(1)}</td>
+      <td><b style="color:#4dd0e1">${r.rs == null ? "–" : r.rs}</b></td>
+      <td>${fmt(r.last)}</td>
       <td>${r.atr20 && r.last ? (r.atr20 / r.last * 100).toFixed(2) + "%" : "–"}</td>
       <td>${sh ? `<b style="color:var(--accent)">${sh.toLocaleString("en-IN")}</b>` : "–"}</td><td>${st}</td>
     </tr>`;
@@ -821,8 +839,8 @@ const cr = v => "₹" + (Math.abs(v) >= 1e7 ? (v / 1e7).toFixed(2) + " cr" : (v 
 
 function basketBlock(p) {
   const head = p.isFno
-    ? `<th>#</th><th style="text-align:left">Symbol</th><th>LTP</th><th>Lot</th><th>LOTS</th><th>Qty</th><th>Notional</th><th>Margin</th><th>ATR%</th><th>Momo</th>`
-    : `<th>#</th><th style="text-align:left">Symbol</th><th>LTP</th><th>Lev</th><th>Shares</th><th>Exposure</th><th>Own funds</th><th>Weight</th><th>ATR%</th><th>Momo</th>`;
+    ? `<th>#</th><th style="text-align:left">Symbol</th><th>LTP</th><th>Lot</th><th>LOTS</th><th>Qty</th><th>Notional</th><th>Margin</th><th>ATR%</th><th>RS</th><th>Momo</th>`
+    : `<th>#</th><th style="text-align:left">Symbol</th><th>LTP</th><th>Lev</th><th>Shares</th><th>Exposure</th><th>Own funds</th><th>Weight</th><th>ATR%</th><th>RS</th><th>Momo</th>`;
   const portRows = p.holdings.map((m, i) => p.isFno ? `
     <tr><td>${i + 1}</td><td><b>${m.sym}</b></td><td style="text-align:right">${fmt(m.last)}</td>
     <td style="text-align:right;color:var(--muted)">${m.lot}</td>
@@ -831,6 +849,7 @@ function basketBlock(p) {
     <td style="text-align:right">₹${fmt(Math.round(m.notional))}</td>
     <td style="text-align:right">₹${fmt(Math.round(m.margin))}</td>
     <td style="text-align:right">${m.atrPct.toFixed(2)}%</td>
+    <td style="text-align:right"><b style="color:#4dd0e1">${m.rs == null ? "–" : m.rs}</b></td>
     <td style="text-align:right">${P2(m.momo)}</td></tr>` : `
     <tr><td>${i + 1}</td><td><b>${m.sym}</b></td><td style="text-align:right">${fmt(m.last)}</td>
     <td style="text-align:right"><b style="color:#c39bd3">${m.lv}×</b></td>
@@ -839,6 +858,7 @@ function basketBlock(p) {
     <td style="text-align:right;color:var(--muted)">₹${fmt(Math.round(m.margin))}</td>
     <td style="text-align:right">${m.wt.toFixed(1)}%</td>
     <td style="text-align:right">${m.atrPct.toFixed(2)}%</td>
+    <td style="text-align:right"><b style="color:#4dd0e1">${m.rs == null ? "–" : m.rs}</b></td>
     <td style="text-align:right">${P2(m.momo)}</td></tr>`).join("");
   const rankRows = p.ranked.slice(0, 20).map(m => `
     <tr><td>${m.rank}</td><td><b>${m.sym}</b></td><td style="text-align:right">${P2(m.momo)}</td>
@@ -854,19 +874,21 @@ function basketBlock(p) {
       stat("Notional exposure", cr(p.notional), "var(--green)") + stat("Margin used", cr(p.margin)) +
       stat("Effective leverage", p.grossLev.toFixed(2) + "×", "var(--green)") + stat("Unused capacity", cr(p.cash)) +
       stat("Avg ATR%", p.avgAtrPct == null ? "–" : p.avgAtrPct.toFixed(2) + "%", "#f5a623") +
+      stat("Avg RS", p.avgRS == null ? "–" : p.avgRS.toFixed(0), "#4dd0e1") +
       (p.skipped ? stat("Skipped (lot &gt; risk unit)", p.skipped, "var(--red)") : "")
     : stat("Own capital", cr(p.av)) + stat("Max leverage in basket", p.maxLev + "×", "#c39bd3") +
       stat("Exposure deployed", cr(p.notional), "var(--green)") +
       stat("Effective leverage", p.grossLev.toFixed(2) + "×", "var(--green)") +
       stat("Own funds used", cr(p.margin)) + stat("Own funds free", cr(p.cash)) +
       stat("Avg ATR%", p.avgAtrPct == null ? "–" : p.avgAtrPct.toFixed(2) + "%", "#f5a623") +
+      stat("Avg RS", p.avgRS == null ? "–" : p.avgRS.toFixed(0), "#4dd0e1") +
       (S.mtfLevExact ? "" : `<span style="font-size:10px;color:var(--red)">⚠ using default ${S.mtfLevDefault}× — load your broker's MTF list for exact per-stock leverage</span>`);
   return `
   <div class="ins-card wide" style="border-color:${p.basket === "fno" ? "var(--accent)" : "#9b59b6"}">
     <h3 style="color:${p.basket === "fno" ? "var(--accent)" : "#c39bd3"}">${p.label} PORTFOLIO — ${p.holdings.length} positions (top ${p.maxPos} of ${p.topN} eligible)</h3>
     <div style="margin:-4px 0 10px">${summary}</div>
     <table class="rot"><thead><tr>${head}</tr></thead>
-    <tbody>${portRows || `<tr><td colspan="10" style="color:var(--muted)">No qualifying stocks in the ${p.label} universe right now.</td></tr>`}</tbody></table>
+    <tbody>${portRows || `<tr><td colspan="11" style="color:var(--muted)">No qualifying stocks in the ${p.label} universe right now.</td></tr>`}</tbody></table>
     <details style="margin-top:10px"><summary style="cursor:pointer;font-size:11px;color:var(--muted)">Momentum ranking — top 20 of ${p.ranked.length} (holds top ${p.topN})</summary>
       <table class="rot" style="margin-top:6px"><thead><tr><th>#</th><th style="text-align:left">Symbol</th><th>Momo</th><th>LTP</th><th>&gt;100DMA</th><th>Max Gap 90d</th><th>Status</th></tr></thead>
       <tbody>${rankRows}</tbody></table>
@@ -896,6 +918,8 @@ function renderPortfolio() {
     <div class="ins-card wide" style="font-size:10px;color:var(--muted);line-height:1.6">
       <b style="color:var(--text)">Shared rules:</b> rank by annualized 90-day exponential regression slope × R²; take only the top <b>${MAX_POSITIONS}</b> qualifying names from the top 20% of that basket's ranking;
       position weights come from ATR risk parity and are then scaled uniformly so the capital is fully deployed across those ${MAX_POSITIONS};
+      <b style="color:var(--text)">RS</b> = ${(RS_W.m1 * 100)}% 1M + ${(RS_W.m3 * 100)}% 3M + ${(RS_W.m6 * 100)}% 6M growth, percentile-ranked 1–99 against the entire ${Object.keys(S.metrics).length}-stock universe
+      (50 = median stock, 90 = stronger than 90% of the market). Portfolio Avg ATR% and Avg RS are exposure-weighted;
       disqualify anything below its 100 DMA or with a 90-day gap &gt; 15%; risk-size each position as Capital × 0.001 / ATR20 (10 bps daily risk per position);
       open new positions only when NIFTY is above its 200 DMA.<br>
       <b style="color:var(--text)">Sizing base:</b> positions are risk-sized against <i>buying power</i>, not bare capital, so the leverage actually gets deployed.
@@ -926,17 +950,17 @@ function buildReport() {
   const row = m => `<tr><td><b>${m.sym}</b></td><td style="text-align:right">${F(m.last)}</td><td style="text-align:right;${col(m.d1)}">${P(m.d1)}</td><td style="text-align:right;${col(m.m1)}">${P(m.m1)}</td><td style="text-align:right">${m.rsi == null ? "–" : m.rsi.toFixed(0)}</td><td style="text-align:right">${m.adr == null ? "–" : m.adr.toFixed(1) + "%"}</td><td style="text-align:right">${m.tov == null ? "–" : "₹" + F(Math.round(m.tov)) + " cr"}</td><td>${setupTxt(m)}</td></tr>`;
   const head = `<tr><th style="text-align:left">Symbol</th><th>LTP</th><th>1D%</th><th>1M%</th><th>RSI</th><th>ADR%</th><th>Avg T/O</th><th style="text-align:left">Setup</th></tr>`;
   const idx = S.indexInfo;
-  const prowF = (m, i) => `<tr><td>${i + 1}</td><td><b>${m.sym}</b></td><td style="text-align:right">${F(m.last)}</td><td style="text-align:right">${m.lot}</td><td style="text-align:right"><b>${m.lots}</b></td><td style="text-align:right">${m.shares.toLocaleString("en-IN")}</td><td style="text-align:right">₹${F(Math.round(m.notional))}</td><td style="text-align:right">₹${F(Math.round(m.margin))}</td><td style="text-align:right">${m.atrPct.toFixed(2)}%</td><td style="text-align:right">${m.momo.toFixed(1)}</td></tr>`;
-  const prowM = (m, i) => `<tr><td>${i + 1}</td><td><b>${m.sym}</b></td><td style="text-align:right">${F(m.last)}</td><td style="text-align:right"><b>${m.lv}×</b></td><td style="text-align:right"><b>${m.shares.toLocaleString("en-IN")}</b></td><td style="text-align:right">₹${F(Math.round(m.notional))}</td><td style="text-align:right">₹${F(Math.round(m.margin))}</td><td style="text-align:right">${m.wt.toFixed(1)}%</td><td style="text-align:right">${m.atrPct.toFixed(2)}%</td><td style="text-align:right">${m.momo.toFixed(1)}</td></tr>`;
+  const prowF = (m, i) => `<tr><td>${i + 1}</td><td><b>${m.sym}</b></td><td style="text-align:right">${F(m.last)}</td><td style="text-align:right">${m.lot}</td><td style="text-align:right"><b>${m.lots}</b></td><td style="text-align:right">${m.shares.toLocaleString("en-IN")}</td><td style="text-align:right">₹${F(Math.round(m.notional))}</td><td style="text-align:right">₹${F(Math.round(m.margin))}</td><td style="text-align:right">${m.atrPct.toFixed(2)}%</td><td style="text-align:right"><b>${m.rs ?? "–"}</b></td><td style="text-align:right">${m.momo.toFixed(1)}</td></tr>`;
+  const prowM = (m, i) => `<tr><td>${i + 1}</td><td><b>${m.sym}</b></td><td style="text-align:right">${F(m.last)}</td><td style="text-align:right"><b>${m.lv}×</b></td><td style="text-align:right"><b>${m.shares.toLocaleString("en-IN")}</b></td><td style="text-align:right">₹${F(Math.round(m.notional))}</td><td style="text-align:right">₹${F(Math.round(m.margin))}</td><td style="text-align:right">${m.wt.toFixed(1)}%</td><td style="text-align:right">${m.atrPct.toFixed(2)}%</td><td style="text-align:right"><b>${m.rs ?? "–"}</b></td><td style="text-align:right">${m.momo.toFixed(1)}</td></tr>`;
   const rrow = m => `<tr><td>${m.rank}</td><td><b>${m.sym}</b></td><td style="text-align:right">${m.momo.toFixed(1)}</td><td style="text-align:right">${F(m.last)}</td><td style="text-align:center">${m.above100 ? "Y" : "N"}</td><td style="text-align:right">${m.gap90 == null ? "–" : m.gap90.toFixed(1) + "%"}</td><td>${m.qual ? "qualified" : "excluded"}</td></tr>`;
   const block = p => `
-<h2>${p.label} Portfolio — ${p.holdings.length} positions (top ${p.maxPos})${p.isFno ? ` · ${p.holdings.reduce((s, h) => s + h.lots, 0)} lots total` : ""} · avg ATR ${p.avgAtrPct == null ? "–" : p.avgAtrPct.toFixed(2) + "%"}</h2>
+<h2>${p.label} Portfolio — ${p.holdings.length} positions (top ${p.maxPos})${p.isFno ? ` · ${p.holdings.reduce((s, h) => s + h.lots, 0)} lots total` : ""} · avg ATR ${p.avgAtrPct == null ? "–" : p.avgAtrPct.toFixed(2) + "%"} · avg RS ${p.avgRS == null ? "–" : p.avgRS.toFixed(0)}</h2>
 <p class="sub">${p.isFno
   ? `Capital (margin) ₹${F(p.av)} · Notional exposure ₹${F(Math.round(p.notional))} · Margin used ₹${F(Math.round(p.margin))} @ ${S.marginPct}% · Effective leverage ${p.grossLev.toFixed(2)}× · Free margin ₹${F(Math.round(p.cash))}`
   : `Own capital ₹${F(p.av)} · Max leverage in basket ${p.maxLev}× · Exposure deployed ₹${F(Math.round(p.notional))} · Effective leverage ${p.grossLev.toFixed(2)}× · Own funds used ₹${F(Math.round(p.margin))} · Free ₹${F(Math.round(p.cash))}`} · Universe ${p.ranked.length} stocks</p>
 <table>${p.isFno
-  ? `<tr><th>#</th><th style="text-align:left">Symbol</th><th>LTP</th><th>Lot</th><th>LOTS</th><th>Qty</th><th>Notional</th><th>Margin</th><th>ATR%</th><th>Momo</th></tr>${p.holdings.map(prowF).join("") || '<tr><td colspan="10">No qualifying stocks.</td></tr>'}`
-  : `<tr><th>#</th><th style="text-align:left">Symbol</th><th>LTP</th><th>Lev</th><th>Shares</th><th>Exposure</th><th>Own funds</th><th>Weight</th><th>ATR%</th><th>Momo</th></tr>${p.holdings.map(prowM).join("") || '<tr><td colspan="10">No qualifying stocks.</td></tr>'}`}</table>
+  ? `<tr><th>#</th><th style="text-align:left">Symbol</th><th>LTP</th><th>Lot</th><th>LOTS</th><th>Qty</th><th>Notional</th><th>Margin</th><th>ATR%</th><th>RS</th><th>Momo</th></tr>${p.holdings.map(prowF).join("") || '<tr><td colspan="11">No qualifying stocks.</td></tr>'}`
+  : `<tr><th>#</th><th style="text-align:left">Symbol</th><th>LTP</th><th>Lev</th><th>Shares</th><th>Exposure</th><th>Own funds</th><th>Weight</th><th>ATR%</th><th>RS</th><th>Momo</th></tr>${p.holdings.map(prowM).join("") || '<tr><td colspan="11">No qualifying stocks.</td></tr>'}`}</table>
 <h3 style="font-size:12px;margin:12px 0 4px">${p.label} — momentum ranking, top 20</h3>
 <table><tr><th>#</th><th style="text-align:left">Symbol</th><th>Momo</th><th>LTP</th><th>&gt;100DMA</th><th>Max Gap 90d</th><th style="text-align:left">Status</th></tr>${p.ranked.slice(0, 20).map(rrow).join("")}</table>`;
   const pf = computePortfolio("fno"), pm = computePortfolio("mtf");

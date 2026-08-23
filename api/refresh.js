@@ -38,6 +38,19 @@ function rsi14(cl) {
 }
 const pctBack = (cl, n) => cl.length > n ? (cl[cl.length - 1] - cl[cl.length - 1 - n]) / cl[cl.length - 1 - n] * 100 : null;
 
+// Relative strength: recency-weighted 1M/3M/6M growth, percentile-ranked 1-99.
+const RS_W = { m1: 0.5, m3: 0.3, m6: 0.2 };
+function rsRawOf(m) {
+  let s = 0, w = 0;
+  for (const k of ["m1", "m3", "m6"]) if (m[k] != null) { s += m[k] * RS_W[k]; w += RS_W[k]; }
+  return w > 0 ? s / w : null;
+}
+function assignRS(metrics) {
+  const arr = Object.values(metrics).filter(m => m.rsRaw != null).sort((a, b) => a.rsRaw - b.rsRaw);
+  const n = arr.length;
+  arr.forEach((m, i) => { m.rs = n > 1 ? Math.round(i / (n - 1) * 98) + 1 : 50; });
+}
+
 function setupExtras(cl, hi, lo, vo) {
   const n = cl.length;
   const out = { vcp: false, htf: false, pb: false, adr: null, tov: null, setupScore: 0 };
@@ -153,7 +166,9 @@ export default async function handler(req, res) {
       ...setupExtras(cl, hh, ll, vv),
       ...momoExtras(cl, hh, ll, oo)
     };
+    metrics[sym].rsRaw = rsRawOf(metrics[sym]);
   }
+  assignRS(metrics);
 
   // Intraday series only for names the charts will actually show:
   // top of the momentum ranking that passes the entry filters, per basket.
