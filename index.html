@@ -127,14 +127,9 @@
   <div class="seg" id="viewSeg">
     <button data-v="charts" class="on">CHARTS</button><button data-v="insights">INSIGHTS</button><button data-v="portfolio">PORTFOLIO</button>
   </div>
-  <label class="ctl">
-    <select id="mode">
-      <option value="movers">Top Movers</option>
-      <option value="gainers">Top Gainers</option>
-      <option value="losers">Top Losers</option>
-      <option value="watchlist">Watchlist</option>
-    </select>
-  </label>
+  <div class="seg" id="basketSeg">
+    <button data-b="fno" class="on">F&amp;O</button><button data-b="mtf">MTF 1:3</button>
+  </div>
   <label class="ctl">Charts <select id="count"></select></label>
   <div class="seg" id="tf">
     <button data-v="5d|5m|1" class="on">1D</button><button data-v="5d|15m">5D</button><button data-v="1mo|1h">1M</button><button data-v="3mo|1d">3M</button><button data-v="6mo|1d">6M</button><button data-v="1y|1wk">1Y</button>
@@ -145,8 +140,8 @@
   <label class="ctl">⟳ <select id="interval">
     <option value="30">30s</option><option value="60" selected>60s</option><option value="120">2m</option><option value="300">5m</option>
   </select></label>
-  <button class="tgl" id="btnReport" title="Generate printable daily report">REPORT</button>
-  <span class="ctl" id="watchlistBox"><input type="text" id="watchlistInput" placeholder="RELIANCE, TCS, HDFCBANK…"></span>
+  <button class="tgl" id="btnReport" title="Generate printable weekly report">REPORT</button>
+  <label class="ctl">Account ₹ <input type="text" id="avTop" style="width:110px;text-align:right"></label>
   <span id="status"></span>
 </div>
 
@@ -154,12 +149,11 @@
 
 <div id="main">
   <div id="side">
-    <h2>Screener — NSE F&amp;O Universe</h2>
+    <h2 id="sideTitle">Momentum Ranking</h2>
     <div id="tblWrap">
       <table>
         <thead><tr id="thRow">
-          <th data-k="sym">Symbol</th><th data-k="last">LTP</th><th data-k="d1" class="sorted">1D%</th>
-          <th data-k="w1">1W%</th><th data-k="m1">1M%</th><th data-k="m3">3M%</th><th data-k="rsi">RSI</th><th data-k="setupScore">Setup</th>
+          <th>#</th><th>Symbol</th><th>Momo</th><th>LTP</th><th>1D%</th><th>ATR20</th><th>Shares</th><th>Status</th>
         </tr></thead>
         <tbody id="tbody"></tbody>
       </table>
@@ -188,7 +182,9 @@
 <script>
 "use strict";
 /* ================= Universe: Nifty 50 + liquid F&O (NSE) — edit freely ================= */
-const UNIVERSE = [
+/* Universe is served by /api/universe (single source of truth: api/_universe.js).
+   This inline list is only a fallback for pure-static hosting. */
+let UNIVERSE = [
   "RELIANCE","HDFCBANK","ICICIBANK","INFY","TCS","BHARTIARTL","SBIN","AXISBANK",
   "KOTAKBANK","ITC","LT","HINDUNILVR","BAJFINANCE","MARUTI","M&M","SUNPHARMA",
   "NTPC","POWERGRID","TITAN","ULTRACEMCO","TATAMOTORS","TATASTEEL","JSWSTEEL",
@@ -198,26 +194,45 @@ const UNIVERSE = [
   "SBILIFE","HDFCLIFE","SHRIRAMFIN","TRENT","BEL","HAL","DLF","VEDL","JIOFIN",
   "PIDILITIND","AMBUJACEM","GAIL","IOC","BPCL","LICI","DMART"
 ];
+async function loadUniverse() {
+  S.lists = { fno: UNIVERSE.slice(), mtf: [] };   // fallback if /api/universe is absent
+  try {
+    const r = await fetch("/api/universe", { cache: "no-store" });
+    if (!r.ok) return;
+    const j = await r.json();
+    if (j.universe && j.universe.length > 50) {
+      UNIVERSE = j.universe;
+      S.lists = { fno: j.fno || [], mtf: j.mtf3 || [] };
+    }
+  } catch (_) {}
+}
 const MAX_CHARTS = 12, METRICS_TTL = 4 * 60 * 1000, IST_OFF = 19800;
 
 const S = {
-  mode: "movers", count: 6, range: "5d", interval: "5m", clip: true, refreshSec: 60,
-  watchlist: [], timer: null, sortKey: "d1", sortDir: -1,
+  count: 6, range: "5d", interval: "5m", clip: true, refreshSec: 60, timer: null,
+  basket: "fno", lists: { fno: [], mtf: [] }, acct: { fno: 1000000, mtf: 1000000 },
   metrics: {}, metricsTime: 0, charts: {}, rows: [],
   showVol: true, showS20: false, showS50: false,
   apiOk: null, modalSym: null, snapIntraday: null, snapTime: 0, view: "charts",
-  acctVal: 1000000, indexInfo: null, idxBusy: false
+  indexInfo: null, idxBusy: false
 };
+const BASKET_LABEL = { fno: "F&O", mtf: "MTF 1:3" };
 const pool = new Map();   // sym -> {chart, series...} reused across refreshes
 let modalChart = null;
 
 /* ================= Data layer: one combined call, edge-cached ================= */
 async function apiMarket(symbols, range, interval) {
-  const qs = `symbols=${symbols.map(encodeURIComponent).join(",")}&range=${range}&interval=${interval}`;
   if (S.apiOk !== false) {
     try {
-      const r = await fetch(`/api/market?${qs}`, { cache: "no-store" });
-      if (r.ok) { S.apiOk = true; return (await r.json()).data; }
+      const groups = [];
+      for (let i = 0; i < symbols.length; i += 100) groups.push(symbols.slice(i, i + 100));
+      const parts = await Promise.all(groups.map(async g => {
+        const r = await fetch(`/api/market?symbols=${g.map(encodeURIComponent).join(",")}&range=${range}&interval=${interval}`, { cache: "no-store" });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return (await r.json()).data;
+      }));
+      S.apiOk = true;
+      return Object.assign({}, ...parts);
     } catch (_) {}
     if (S.apiOk === null) S.apiOk = false;
   }
@@ -327,7 +342,7 @@ const tagsHtml = (m, dash) =>
   ((m.vcp ? '<i class="tag vcp">VCP</i>' : "") + (m.htf ? '<i class="tag htf">HTF</i>' : "") + (m.pb ? '<i class="tag pb">PB</i>' : "")) || (dash ? "–" : "");
 
 async function loadMetrics(force) {
-  const symbols = S.mode === "watchlist" && S.watchlist.length ? S.watchlist : UNIVERSE;
+  const symbols = UNIVERSE;
   if (!force && Object.keys(S.metrics).length && Date.now() - S.metricsTime < METRICS_TTL) return;
   const data = await apiMarket(symbols, "1y", "1d");
   const m = {};
@@ -357,29 +372,33 @@ async function loadMetrics(force) {
   try { localStorage.setItem("mp_metrics", JSON.stringify({ m, t: Date.now() })) } catch (_) {}
 }
 
-function rankedRows() {
-  let rows = Object.values(S.metrics);
-  if (S.mode === "watchlist") {
-    rows = rows.filter(r => S.watchlist.includes(r.sym));
-    rows.sort((a, b) => S.watchlist.indexOf(a.sym) - S.watchlist.indexOf(b.sym));
-    return rows;
+/* Momentum ranking + target portfolio, computed per basket (F&O and MTF are
+   ranked and sized independently — same rules, separate capital). */
+function computePortfolio(basket) {
+  const b = basket || S.basket;
+  const member = new Set(S.lists[b] && S.lists[b].length ? S.lists[b] : UNIVERSE);
+  const ms = Object.values(S.metrics).filter(m => m.momo != null && m.last && member.has(m.sym));
+  const ranked = [...ms].sort((a, b2) => b2.momo - a.momo);
+  const topN = Math.ceil(ranked.length * 0.2);   // book: only hold the top 20% of the ranking
+  const av = S.acct[b];
+  let cash = av;
+  const holdings = [];
+  for (const m of ranked.slice(0, topN)) {
+    if (!m.qual || !m.atr20) continue;
+    const shares = Math.floor(av * 0.001 / m.atr20);   // AccountValue × 0.001 / ATR20
+    if (shares < 1) continue;
+    const cost = shares * m.last;
+    if (cost > cash) continue;
+    holdings.push({ ...m, shares, cost, wt: cost / av * 100 });
+    cash -= cost;
+    if (cash < av * 0.02) break;
   }
-  const k = S.sortKey, dir = S.sortDir;
-  rows.sort((a, b) => {
-    if (k === "sym") return dir * a.sym.localeCompare(b.sym);
-    const av = a[k] ?? -1e9, bv = b[k] ?? -1e9;
-    return dir * (av - bv);
-  });
-  return rows;
+  const held = new Set(holdings.map(h => h.sym));
+  const rankedOut = ranked.map((m, i) => ({ ...m, rank: i + 1, hold: held.has(m.sym) }));
+  return { basket: b, label: BASKET_LABEL[b], ranked: rankedOut, holdings, cash, topN, av, invested: av - cash };
 }
-function chartPicks(rows) {
-  if (S.mode === "watchlist") return rows.slice(0, S.count);
-  let r = [...rows];
-  if (S.mode === "gainers") r.sort((a, b) => (b.d1 ?? -1e9) - (a.d1 ?? -1e9));
-  else if (S.mode === "losers") r.sort((a, b) => (a.d1 ?? 1e9) - (b.d1 ?? 1e9));
-  else r.sort((a, b) => Math.abs(b.d1 ?? 0) - Math.abs(a.d1 ?? 0));
-  return r.slice(0, S.count);
-}
+function rankedRows() { return computePortfolio().ranked; }
+function chartPicks() { return computePortfolio().holdings.slice(0, S.count); }
 
 /* ================= Server snapshot: precomputed by /api/refresh + cron ================= */
 async function loadSnapshot() {
@@ -389,7 +408,6 @@ async function loadSnapshot() {
     if (!r.ok) return false;
     const j = await r.json();
     if (!j || !j.metrics || Date.now() - j.ts > 6 * 60 * 1000) return false;
-    if (S.mode === "watchlist" && S.watchlist.some(s => !j.metrics[s])) return false;
     S.metrics = j.metrics; S.metricsTime = j.ts;
     S.snapIntraday = j.intraday || null; S.snapTime = j.ts;
     if (j.index) S.indexInfo = j.index;
@@ -566,22 +584,34 @@ function render(picks) {
 
 function renderTable(liveSet) {
   const tb = document.getElementById("tbody");
-  tb.innerHTML = S.rows.map(r => `
-    <tr data-s="${r.sym}" class="${liveSet && liveSet.has(r.sym) ? "live" : ""}">
-      <td>${r.sym}</td><td>${fmt(r.last)}</td>
-      <td class="${cls(r.d1)}">${pc(r.d1)}</td><td class="${cls(r.w1)}">${pc(r.w1)}</td>
-      <td class="${cls(r.m1)}">${pc(r.m1)}</td><td class="${cls(r.m3)}">${pc(r.m3)}</td>
-      <td>${r.rsi == null ? "–" : r.rsi.toFixed(0)}</td><td>${tagsHtml(r, true)}</td>
-    </tr>`).join("");
+  const t = document.getElementById("sideTitle");
+  if (t) t.textContent = `Momentum Ranking — ${BASKET_LABEL[S.basket]} (${(S.rows || []).length})`;
+  tb.innerHTML = (S.rows || []).map(r => {
+    const sh = r.atr20 ? Math.floor(S.acct[S.basket] * 0.001 / r.atr20) : 0;
+    const st = r.hold ? '<span style="color:var(--green);font-weight:700">HOLD</span>'
+             : !r.qual ? `<span class="qn" title="${r.above100 === false ? "below 100 DMA" : "gap > 15%"}">excl</span>`
+             : '<span style="color:var(--muted)">–</span>';
+    return `<tr data-s="${r.sym}" class="${liveSet && liveSet.has(r.sym) ? "live" : ""}">
+      <td style="color:var(--muted)">${r.rank}</td><td>${r.sym}</td>
+      <td>${r.momo == null ? "–" : r.momo.toFixed(1)}</td><td>${fmt(r.last)}</td>
+      <td class="${cls(r.d1)}">${pc(r.d1)}</td>
+      <td>${r.atr20 ? r.atr20.toFixed(1) : "–"}</td>
+      <td>${r.hold ? sh.toLocaleString("en-IN") : "–"}</td><td>${st}</td>
+    </tr>`;
+  }).join("");
   tb.querySelectorAll("tr").forEach(tr => tr.onclick = () => openModal(tr.dataset.s));
 }
 
 function renderStrip() {
-  const sorted = [...Object.values(S.metrics)].sort((a, b) => (b.d1 ?? 0) - (a.d1 ?? 0));
-  const picks = sorted.slice(0, 10).concat(sorted.slice(-10).reverse());
-  document.getElementById("strip").innerHTML = picks.map(r =>
-    `<span class="chip" data-s="${r.sym}"><span class="sym">${r.sym}</span><span class="${cls(r.d1)}">${pc(r.d1)}</span></span>`).join("");
-  document.querySelectorAll("#strip .chip").forEach(c => c.onclick = () => openModal(c.dataset.s));
+  const p = computePortfolio();
+  const idx = S.indexInfo;
+  const head = (idx
+    ? `<span class="chip" style="border-color:${idx.positive ? "var(--green)" : "var(--red)"}"><span class="sym">NIFTY ${idx.positive ? "▲ above" : "▼ below"} 200DMA</span><span class="${idx.positive ? "up" : "down"}">${idx.positive ? "buys ON" : "buys OFF"}</span></span>`
+    : "")
+    + `<span class="chip" style="border-color:${S.basket === "fno" ? "var(--accent)" : "#9b59b6"}"><span class="sym">${p.label}</span><span style="color:var(--muted)">${p.holdings.length} pos</span></span>`;
+  document.getElementById("strip").innerHTML = head + p.holdings.map(r =>
+    `<span class="chip" data-s="${r.sym}"><span class="sym">${r.sym}</span><span class="${cls(r.d1)}">${pc(r.d1)}</span><span style="color:var(--muted)">${r.shares.toLocaleString("en-IN")}sh</span></span>`).join("");
+  document.querySelectorAll("#strip .chip[data-s]").forEach(c => c.onclick = () => openModal(c.dataset.s));
 }
 
 /* ================= Insights view (Weekend Investing style breadth) ================= */
@@ -709,69 +739,62 @@ async function ensureIndexInfo() {
   S.idxBusy = false;
 }
 
-function renderPortfolio() {
-  const el = document.getElementById("portfolio");
-  const ms = Object.values(S.metrics).filter(m => m.momo != null && m.last);
-  if (!ms.length) { el.innerHTML = '<div id="msg"><span class="spin"></span>Loading…</div>'; return; }
-  if (!S.indexInfo) ensureIndexInfo();
-  const av = S.acctVal;
-  const ranked = [...ms].sort((a, b) => b.momo - a.momo);
-  const topN = Math.ceil(ranked.length * 0.2);            // book: hold only top 20% of ranking
+const P2 = v => v == null ? "–" : (v >= 0 ? "+" : "") + v.toFixed(1);
 
-  let cash = av; const port = [];
-  for (const m of ranked.slice(0, topN)) {
-    if (!m.qual || !m.atr20) continue;
-    const shares = Math.floor(av * 0.001 / m.atr20);      // AccountValue × 0.001 / ATR20
-    if (shares < 1) continue;
-    const cost = shares * m.last;
-    if (cost > cash) continue;
-    port.push({ ...m, shares, cost, wt: cost / av * 100 });
-    cash -= cost;
-    if (cash < av * 0.02) break;
-  }
-  const idx = S.indexInfo;
-  const idxHtml = idx == null
-    ? '<span class="idxbadge">Checking Nifty trend…</span>'
-    : idx.positive
-      ? `<span class="idxbadge ok">NIFTY ${fmt(idx.last)} &gt; 200 DMA ${fmt(idx.sma200)} — new buys allowed</span>`
-      : `<span class="idxbadge no">NIFTY ${fmt(idx.last)} &lt; 200 DMA ${fmt(idx.sma200)} — index filter negative: no new buys, sells only</span>`;
-  const P2 = v => v == null ? "–" : (v >= 0 ? "+" : "") + v.toFixed(1);
-  const rankRows = ranked.slice(0, 25).map((m, i) => `
-    <tr><td>${i + 1}</td><td><b>${m.sym}</b></td><td style="text-align:right">${P2(m.momo)}</td>
-    <td style="text-align:right">${fmt(m.last)}</td>
-    <td class="${m.above100 ? "qy" : "qn"}" style="text-align:center">${m.above100 ? "✓" : "✗"}</td>
-    <td class="${m.gap90 <= 15 ? "qy" : "qn"}" style="text-align:right">${m.gap90 == null ? "–" : m.gap90.toFixed(1) + "%"}</td>
-    <td class="${m.qual ? "qy" : "qn"}" style="text-align:center">${m.qual ? "QUALIFIED" : "excluded"}</td></tr>`).join("");
-  const portRows = port.map((m, i) => `
+function basketBlock(p) {
+  const portRows = p.holdings.map((m, i) => `
     <tr><td>${i + 1}</td><td><b>${m.sym}</b></td><td style="text-align:right">${fmt(m.last)}</td>
     <td style="text-align:right"><b>${m.shares.toLocaleString("en-IN")}</b></td>
     <td style="text-align:right">₹${fmt(Math.round(m.cost))}</td>
     <td style="text-align:right">${m.wt.toFixed(1)}%</td>
     <td style="text-align:right">${m.atr20.toFixed(1)}</td>
     <td style="text-align:right">${P2(m.momo)}</td></tr>`).join("");
-  const invested = av - cash;
+  const rankRows = p.ranked.slice(0, 20).map(m => `
+    <tr><td>${m.rank}</td><td><b>${m.sym}</b></td><td style="text-align:right">${P2(m.momo)}</td>
+    <td style="text-align:right">${fmt(m.last)}</td>
+    <td class="${m.above100 ? "qy" : "qn"}" style="text-align:center">${m.above100 ? "✓" : "✗"}</td>
+    <td class="${m.gap90 <= 15 ? "qy" : "qn"}" style="text-align:right">${m.gap90 == null ? "–" : m.gap90.toFixed(1) + "%"}</td>
+    <td class="${m.qual ? "qy" : "qn"}" style="text-align:center">${m.qual ? "QUALIFIED" : "excluded"}</td></tr>`).join("");
+  return `
+  <div class="ins-card wide" style="border-color:${p.basket === "fno" ? "var(--accent)" : "#9b59b6"}">
+    <h3 style="color:${p.basket === "fno" ? "var(--accent)" : "#c39bd3"}">${p.label} PORTFOLIO — ${p.holdings.length} positions ·
+      ₹${fmt(Math.round(p.invested))} invested (${(p.invested / p.av * 100).toFixed(0)}%) · ₹${fmt(Math.round(p.cash))} cash ·
+      capital ₹${p.av.toLocaleString("en-IN")}</h3>
+    <table class="rot"><thead><tr><th>#</th><th style="text-align:left">Symbol</th><th>LTP</th><th>Shares</th><th>Value</th><th>Weight</th><th>ATR20</th><th>Momo</th></tr></thead>
+    <tbody>${portRows || `<tr><td colspan="8" style="color:var(--muted)">No qualifying stocks in the ${p.label} universe right now.</td></tr>`}</tbody></table>
+    <details style="margin-top:10px"><summary style="cursor:pointer;font-size:11px;color:var(--muted)">Momentum ranking — top 20 of ${p.ranked.length} (holds top ${p.topN})</summary>
+      <table class="rot" style="margin-top:6px"><thead><tr><th>#</th><th style="text-align:left">Symbol</th><th>Momo</th><th>LTP</th><th>&gt;100DMA</th><th>Max Gap 90d</th><th>Status</th></tr></thead>
+      <tbody>${rankRows}</tbody></table>
+    </details>
+  </div>`;
+}
+
+function renderPortfolio() {
+  const el = document.getElementById("portfolio");
+  if (!Object.keys(S.metrics).length) { el.innerHTML = '<div id="msg"><span class="spin"></span>Loading…</div>'; return; }
+  if (!S.indexInfo) ensureIndexInfo();
+  const idx = S.indexInfo;
+  const idxHtml = idx == null
+    ? '<span class="idxbadge">Checking Nifty trend…</span>'
+    : idx.positive
+      ? `<span class="idxbadge ok">NIFTY ${fmt(idx.last)} &gt; 200 DMA ${fmt(idx.sma200)} — new buys allowed</span>`
+      : `<span class="idxbadge no">NIFTY ${fmt(idx.last)} &lt; 200 DMA ${fmt(idx.sma200)} — index filter negative: no new buys, sells only</span>`;
+  const fno = computePortfolio("fno"), mtf = computePortfolio("mtf");
   el.innerHTML = `<div class="ins-grid">
     <div class="ins-card wide" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
-      <h3 style="margin:0">Momentum Portfolio — weekly rebalance reference</h3>
+      <h3 style="margin:0">Weekly Rebalance — two portfolios, one strategy</h3>
       ${idxHtml}
-      <label class="ctl" style="margin-left:auto">Account ₹
-        <input type="text" id="avInput" value="${av.toLocaleString("en-IN")}">
-      </label>
+      <span style="margin-left:auto;font-size:11px;color:var(--muted)">Set each basket's capital in the toolbar (switch F&amp;O / MTF)</span>
     </div>
-    <div class="ins-card wide"><h3>Target Portfolio — ${port.length} positions · ₹${fmt(Math.round(invested))} invested (${(invested / av * 100).toFixed(0)}%) · ₹${fmt(Math.round(cash))} cash</h3>
-      <table class="rot"><thead><tr><th>#</th><th style="text-align:left">Symbol</th><th>LTP</th><th>Shares</th><th>Value</th><th>Weight</th><th>ATR20</th><th>Momo</th></tr></thead>
-      <tbody>${portRows || '<tr><td colspan="8" style="color:var(--muted)">No qualifying stocks right now.</td></tr>'}</tbody></table>
-      <div style="font-size:10px;color:var(--muted);margin-top:8px">Sizing: shares = Account × 0.001 / ATR20 (10 bps daily risk). Holds top ${topN} of ${ranked.length} by momentum; disqualified if below 100 DMA or any 90-day gap &gt; 15%. Educational tool, not investment advice.</div>
-    </div>
-    <div class="ins-card wide"><h3>Momentum Ranking — top 25 (annualized 90d regression slope × R²)</h3>
-      <table class="rot"><thead><tr><th>#</th><th style="text-align:left">Symbol</th><th>Momo</th><th>LTP</th><th>&gt;100DMA</th><th>Max Gap 90d</th><th>Status</th></tr></thead>
-      <tbody>${rankRows}</tbody></table>
+    ${basketBlock(fno)}
+    ${basketBlock(mtf)}
+    <div class="ins-card wide" style="font-size:10px;color:var(--muted)">
+      Both baskets use identical rules: rank by annualized 90-day exponential regression slope × R²; hold only the top 20% of that basket's ranking;
+      disqualify anything below its 100 DMA or with a 90-day gap &gt; 15%; size each position as Capital × 0.001 / ATR20 (10 bps daily risk);
+      open new positions only when NIFTY is above its 200 DMA. Rankings and capital are independent per basket.
+      Educational screening tool — not investment advice.
     </div>
   </div>`;
-  el.querySelector("#avInput").onchange = e => {
-    const v = parseInt(e.target.value.replace(/[^0-9]/g, ""), 10);
-    if (v > 0) { S.acctVal = v; try { localStorage.setItem("mp_av", v) } catch (_) {} renderPortfolio(); }
-  };
 }
 
 /* ================= Daily report (doc point 8) ================= */
@@ -788,8 +811,16 @@ function buildReport() {
   const col = v => v == null ? "" : v >= 0 ? "color:#0a7d5c" : "color:#c0392b";
   const row = m => `<tr><td><b>${m.sym}</b></td><td style="text-align:right">${F(m.last)}</td><td style="text-align:right;${col(m.d1)}">${P(m.d1)}</td><td style="text-align:right;${col(m.m1)}">${P(m.m1)}</td><td style="text-align:right">${m.rsi == null ? "–" : m.rsi.toFixed(0)}</td><td style="text-align:right">${m.adr == null ? "–" : m.adr.toFixed(1) + "%"}</td><td style="text-align:right">${m.tov == null ? "–" : "₹" + F(Math.round(m.tov)) + " cr"}</td><td>${setupTxt(m)}</td></tr>`;
   const head = `<tr><th style="text-align:left">Symbol</th><th>LTP</th><th>1D%</th><th>1M%</th><th>RSI</th><th>ADR%</th><th>Avg T/O</th><th style="text-align:left">Setup</th></tr>`;
-  const by = k => [...ms].sort((a, b) => (b[k] ?? -99) - (a[k] ?? -99));
-  const gain = by("d1").slice(0, 10), lose = by("d1").slice(-10).reverse();
+  const idx = S.indexInfo;
+  const prow = (m, i) => `<tr><td>${i + 1}</td><td><b>${m.sym}</b></td><td style="text-align:right">${F(m.last)}</td><td style="text-align:right"><b>${m.shares.toLocaleString("en-IN")}</b></td><td style="text-align:right">₹${F(Math.round(m.cost))}</td><td style="text-align:right">${m.wt.toFixed(1)}%</td><td style="text-align:right">${m.atr20.toFixed(1)}</td><td style="text-align:right">${m.momo.toFixed(1)}</td></tr>`;
+  const rrow = m => `<tr><td>${m.rank}</td><td><b>${m.sym}</b></td><td style="text-align:right">${m.momo.toFixed(1)}</td><td style="text-align:right">${F(m.last)}</td><td style="text-align:center">${m.above100 ? "Y" : "N"}</td><td style="text-align:right">${m.gap90 == null ? "–" : m.gap90.toFixed(1) + "%"}</td><td>${m.qual ? "qualified" : "excluded"}</td></tr>`;
+  const block = p => `
+<h2>${p.label} Portfolio — ${p.holdings.length} positions</h2>
+<p class="sub">Capital ₹${F(p.av)} · Invested ₹${F(Math.round(p.invested))} (${(p.invested / p.av * 100).toFixed(0)}%) · Cash ₹${F(Math.round(p.cash))} · Universe ${p.ranked.length} stocks</p>
+<table><tr><th>#</th><th style="text-align:left">Symbol</th><th>LTP</th><th>Shares</th><th>Value</th><th>Weight</th><th>ATR20</th><th>Momo</th></tr>${p.holdings.map(prow).join("") || '<tr><td colspan="8">No qualifying stocks.</td></tr>'}</table>
+<h3 style="font-size:12px;margin:12px 0 4px">${p.label} — momentum ranking, top 20</h3>
+<table><tr><th>#</th><th style="text-align:left">Symbol</th><th>Momo</th><th>LTP</th><th>&gt;100DMA</th><th>Max Gap 90d</th><th style="text-align:left">Status</th></tr>${p.ranked.slice(0, 20).map(rrow).join("")}</table>`;
+  const pf = computePortfolio("fno"), pm = computePortfolio("mtf");
   const avg = a => { const v = a.filter(x => x != null); return v.length ? v.reduce((x, y) => x + y, 0) / v.length : null; };
   const secRows = Object.entries(SECTORS).map(([sec, list]) => {
     const mm = list.map(s => S.metrics[s]).filter(Boolean);
@@ -805,19 +836,19 @@ h1{font-size:20px;margin-bottom:2px}h2{font-size:14px;margin:22px 0 8px;border-b
 table{width:100%;border-collapse:collapse;font-size:12px}th{background:#f0f0f5;padding:5px 7px;text-align:right;font-size:10.5px;text-transform:uppercase}
 td{padding:4px 7px;border-bottom:1px solid #e8e8ee}.sub{color:#666;font-size:12px}.stat{display:inline-block;margin-right:24px}
 .stat b{font-size:17px}@media print{body{margin:8px auto}}</style></head><body>
-<h1>Daily Market Report</h1><div class="sub">${dt} · NSE F&amp;O universe (${n} stocks) · Generated by Market Pulse Pro</div>
-<h2>Market Summary</h2>
+<h1>Weekly Rebalance Sheet</h1><div class="sub">${dt} · Momentum strategy · two portfolios (F&amp;O + MTF 1:3) · ${n} stocks screened</div>
+<h2>Index Filter</h2>
+<p>${idx ? (idx.positive
+   ? `<b style="color:#0a7d5c">NIFTY ${F(idx.last)} is ABOVE its 200 DMA (${F(idx.sma200)}) — new buys allowed in both portfolios.</b>`
+   : `<b style="color:#c0392b">NIFTY ${F(idx.last)} is BELOW its 200 DMA (${F(idx.sma200)}) — no new buys this week in either portfolio. Sell exits only.</b>`) : "Index trend unavailable."}</p>
+${block(pf)}
+${block(pm)}
+<p class="sub">Sizing: shares = Capital × 0.001 / ATR20. In each portfolio, sell anything you hold that is absent from its list; buy new names only if the index filter above is positive. The two baskets are ranked and sized independently.</p>
+<h2>Market Context</h2>
 <span class="stat"><b>${adv}</b> advancing</span><span class="stat"><b>${dec}</b> declining</span>
-<span class="stat"><b>${(cnt("a20") / n * 100).toFixed(0)}%</b> above 20 DMA</span>
-<span class="stat"><b>${(cnt("a50") / n * 100).toFixed(0)}%</b> above 50 DMA</span>
 <span class="stat"><b>${(cnt("a200") / n * 100).toFixed(0)}%</b> above 200 DMA</span>
-<h2>Top 10 Gainers</h2><table>${head}${gain.map(row).join("")}</table>
-<h2>Top 10 Losers</h2><table>${head}${lose.map(row).join("")}</table>
 <h2>Sector Rotation (avg returns, ranked by 1M)</h2>
 <table><tr><th style="text-align:left">Sector</th><th>1D</th><th>1W</th><th>1M</th><th>3M</th><th>6M</th><th>1Y</th></tr>${secHtml}</table>
-<h2>Setup Candidates (heuristic — verify on charts)</h2>
-<p><b>VCP:</b> ${setups("vcp")}<br><b>High Tight Flag:</b> ${setups("htf")}<br><b>Pullback:</b> ${setups("pb")}</p>
-<h2>Within 5% of 52-Week High</h2><p>${near}</p>
 <p class="sub">Data: Yahoo Finance (~15 min delayed). Not investment advice.</p>
 <script>window.onload=()=>setTimeout(()=>window.print(),400)<\/script></body></html>`;
   const w = window.open("about:blank");
@@ -853,11 +884,6 @@ function init() {
     else if (S.view === "portfolio") renderPortfolio();
     else render(chartPicks(S.rows));
   });
-  document.getElementById("mode").onchange = e => {
-    S.mode = e.target.value;
-    document.getElementById("watchlistBox").style.display = S.mode === "watchlist" ? "flex" : "none";
-    S.metricsTime = 0; refresh(true);
-  };
   countSel.onchange = e => { S.count = +e.target.value; refresh(); };
   document.querySelectorAll("#tf button").forEach(b => b.onclick = () => {
     document.querySelectorAll("#tf button").forEach(x => x.classList.remove("on"));
@@ -874,16 +900,25 @@ function init() {
     };
   }
   document.getElementById("interval").onchange = e => { S.refreshSec = +e.target.value; schedule(); };
-  document.getElementById("watchlistInput").onchange = e => {
-    S.watchlist = e.target.value.split(/[,\s]+/).map(s => s.trim().toUpperCase()).filter(Boolean);
-    try { localStorage.setItem("mp_watchlist", S.watchlist.join(",")) } catch (_) {}
-    S.metricsTime = 0; refresh(true);
+  const avTop = document.getElementById("avTop");
+  const syncAv = () => { avTop.value = S.acct[S.basket].toLocaleString("en-IN"); };
+  avTop.onchange = e => {
+    const v = parseInt(e.target.value.replace(/[^0-9]/g, ""), 10);
+    if (!(v > 0)) { syncAv(); return; }
+    S.acct[S.basket] = v;
+    try { localStorage.setItem("mp_acct", JSON.stringify(S.acct)) } catch (_) {}
+    syncAv();
+    S.rows = rankedRows(); renderTable(new Set([...pool.keys()])); renderStrip();
+    if (S.view === "portfolio") renderPortfolio(); else if (S.view === "charts") refresh();
   };
-  document.getElementById("thRow").querySelectorAll("th").forEach(th => th.onclick = () => {
-    const k = th.dataset.k;
-    if (S.sortKey === k) S.sortDir *= -1; else { S.sortKey = k; S.sortDir = k === "sym" ? 1 : -1; }
-    document.querySelectorAll("#thRow th").forEach(x => x.classList.toggle("sorted", x === th));
-    S.rows = rankedRows(); renderTable(new Set([...pool.keys()]));
+  document.querySelectorAll("#basketSeg button").forEach(b => b.onclick = () => {
+    document.querySelectorAll("#basketSeg button").forEach(x => x.classList.remove("on"));
+    b.classList.add("on");
+    S.basket = b.dataset.b;
+    try { localStorage.setItem("mp_basket", S.basket) } catch (_) {}
+    syncAv();
+    S.rows = rankedRows(); renderTable(new Set([...pool.keys()])); renderStrip();
+    if (S.view === "portfolio") renderPortfolio(); else if (S.view === "charts") refresh();
   });
   document.getElementById("btnReport").onclick = buildReport;
   document.getElementById("modalClose").onclick = closeModal;
@@ -893,16 +928,21 @@ function init() {
   try {   // instant paint from cached metrics while fresh data loads
     const snap = JSON.parse(localStorage.getItem("mp_metrics") || "null");
     if (snap && snap.m) { S.metrics = snap.m; S.rows = rankedRows(); renderTable(); renderStrip(); }
-    const av = parseInt(localStorage.getItem("mp_av") || "0", 10);
-    if (av > 0) S.acctVal = av;
-    const saved = localStorage.getItem("mp_watchlist");
-    if (saved) { S.watchlist = saved.split(","); document.getElementById("watchlistInput").value = saved.replace(/,/g, ", "); }
+    const a = JSON.parse(localStorage.getItem("mp_acct") || "null");
+    if (a && a.fno > 0 && a.mtf > 0) S.acct = a;
+    else { const old = parseInt(localStorage.getItem("mp_av") || "0", 10); if (old > 0) S.acct = { fno: old, mtf: old }; }
+    const bk = localStorage.getItem("mp_basket");
+    if (bk === "fno" || bk === "mtf") {
+      S.basket = bk;
+      document.querySelectorAll("#basketSeg button").forEach(x => x.classList.toggle("on", x.dataset.b === bk));
+    }
   } catch (_) {}
 
   window.addEventListener("resize", () => { clearTimeout(rT); rT = setTimeout(() => render(chartPicks(S.rows)), 200); });
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+  syncAv();
   marketStatus(); setInterval(marketStatus, 30000);
-  refresh(); schedule();
+  loadUniverse().then(() => { ensureIndexInfo(); refresh(); schedule(); });
 }
 init();
 </script>

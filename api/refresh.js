@@ -2,16 +2,7 @@
 // series) and stores it in Upstash Redis (free KV). Ping this every minute during
 // market hours from cron-job.org — the app then loads instantly from /api/snapshot,
 // even for the first visitor of the day.
-const UNIVERSE = [
-  "RELIANCE","HDFCBANK","ICICIBANK","INFY","TCS","BHARTIARTL","SBIN","AXISBANK",
-  "KOTAKBANK","ITC","LT","HINDUNILVR","BAJFINANCE","MARUTI","M&M","SUNPHARMA",
-  "NTPC","POWERGRID","TITAN","ULTRACEMCO","TATAMOTORS","TATASTEEL","JSWSTEEL",
-  "ASIANPAINT","NESTLEIND","ADANIENT","ADANIPORTS","ONGC","COALINDIA","BAJAJFINSV",
-  "HCLTECH","WIPRO","TECHM","GRASIM","DRREDDY","CIPLA","APOLLOHOSP","EICHERMOT",
-  "HEROMOTOCO","BAJAJ-AUTO","BRITANNIA","TATACONSUM","HINDALCO","INDUSINDBK",
-  "SBILIFE","HDFCLIFE","SHRIRAMFIN","TRENT","BEL","HAL","DLF","VEDL","JIOFIN",
-  "PIDILITIND","AMBUJACEM","GAIL","IOC","BPCL","LICI","DMART"
-];
+import { UNIVERSE, FNO, MTF3 } from "./_universe.js";
 const H = { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", "Accept": "application/json" };
 
 async function yChart(s, range, interval) {
@@ -107,6 +98,8 @@ function momoExtras(cl, hi, lo, op) {
   return out;
 }
 
+export const config = { maxDuration: 60 };
+
 export default async function handler(req, res) {
   if (process.env.REFRESH_TOKEN && req.query.token !== process.env.REFRESH_TOKEN)
     return res.status(401).json({ error: "unauthorized" });
@@ -115,24 +108,29 @@ export default async function handler(req, res) {
     const s = Math.max(0, d.t.length - keep);
     return { ...d, t: d.t.slice(s), o: d.o.slice(s), h: d.h.slice(s), l: d.l.slice(s), c: d.c.slice(s), v: d.v.slice(s) };
   };
+  // Bounded-concurrency map: ~340 symbols would swamp Yahoo (and the 60s budget)
+  // if fired all at once.
+  async function pMap(items, limit, fn) {
+    const out = new Array(items.length);
+    let i = 0;
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (i < items.length) { const k = i++; out[k] = await fn(items[k], k); }
+    }));
+    return out;
+  }
+
   const daily = {}, intraday = {};
   let index = null;
-  await Promise.all([
-    ...UNIVERSE.map(async s => {
-      const [d, i] = await Promise.all([yChart(s, "1y", "1d"), yChart(s, "5d", "5m")]);
-      if (d) daily[s] = d;
-      if (i) intraday[s] = trim(i);
-    }),
-    (async () => {
-      const d = await yChart("^NSEI", "1y", "1d");
-      if (d) {
-        const cl = d.c.filter(x => x != null);
-        const s200 = cl.length >= 200 ? cl.slice(-200).reduce((a, b) => a + b, 0) / 200 : null;
-        const last = d.meta.last ?? cl[cl.length - 1];
-        index = { last, sma200: s200, positive: s200 != null ? last > s200 : null };
-      }
-    })()
+  const [, idxData] = await Promise.all([
+    pMap(UNIVERSE, 24, async s => { const d = await yChart(s, "1y", "1d"); if (d) daily[s] = d; }),
+    yChart("^NSEI", "1y", "1d")
   ]);
+  if (idxData) {
+    const cl = idxData.c.filter(x => x != null);
+    const s200 = cl.length >= 200 ? cl.slice(-200).reduce((a, b) => a + b, 0) / 200 : null;
+    const last = idxData.meta.last ?? cl[cl.length - 1];
+    index = { last, sma200: s200, positive: s200 != null ? last > s200 : null };
+  }
 
   const metrics = {};
   for (const [sym, d] of Object.entries(daily)) {
@@ -156,6 +154,22 @@ export default async function handler(req, res) {
       ...momoExtras(cl, hh, ll, oo)
     };
   }
+
+  // Intraday series only for names the charts will actually show:
+  // top of the momentum ranking that passes the entry filters, per basket.
+  const topOf = list => {
+    const set = new Set(list);
+    return Object.values(metrics)
+      .filter(m => m.momo != null && m.qual && set.has(m.sym))
+      .sort((a, b) => b.momo - a.momo)
+      .slice(0, 14)
+      .map(m => m.sym);
+  };
+  const chartSyms = [...new Set([...topOf(FNO), ...topOf(MTF3)])];
+  await pMap(chartSyms, 16, async s => {
+    const i = await yChart(s, "5d", "5m");
+    if (i) intraday[s] = trim(i);
+  });
 
   const snap = { ts: Date.now(), metrics, intraday, index };
   const url = process.env.UPSTASH_REDIS_REST_URL, tok = process.env.UPSTASH_REDIS_REST_TOKEN;

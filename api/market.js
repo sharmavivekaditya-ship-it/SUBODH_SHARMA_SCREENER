@@ -2,9 +2,10 @@
 // server-side and returns ONE payload. Edge-cached so repeat loads are instant.
 const OK_SYM = /^[A-Z0-9&.\-^]{1,20}$/i;
 const OK_TOKEN = /^[0-9a-z]{1,5}$/;
+export const config = { maxDuration: 60 };
 
 export default async function handler(req, res) {
-  const syms = String(req.query.symbols || "").split(",").map(s => s.trim()).filter(s => OK_SYM.test(s)).slice(0, 80);
+  const syms = String(req.query.symbols || "").split(",").map(s => s.trim()).filter(s => OK_SYM.test(s)).slice(0, 400);
   const range = String(req.query.range || "1d");
   const interval = String(req.query.interval || "5m");
   if (!syms.length) return res.status(400).json({ error: "symbols required" });
@@ -12,7 +13,13 @@ export default async function handler(req, res) {
 
   const H = { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", "Accept": "application/json" };
   const out = {};
-  await Promise.all(syms.map(async s => {
+  async function pMap(items, limit, fn) {
+    let i = 0;
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (i < items.length) await fn(items[i++]);
+    }));
+  }
+  await pMap(syms, 24, async s => {
     const sym = s.startsWith("^") || s.includes(".") ? s : s + ".NS";
     try {
       const r = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?range=${range}&interval=${interval}&includePrePost=false`, { headers: H });
@@ -32,7 +39,7 @@ export default async function handler(req, res) {
         }
       };
     } catch (_) { /* skip symbol */ }
-  }));
+  });
 
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Cache-Control", "s-maxage=25, stale-while-revalidate=300");
