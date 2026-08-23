@@ -141,7 +141,11 @@
     <option value="30">30s</option><option value="60" selected>60s</option><option value="120">2m</option><option value="300">5m</option>
   </select></label>
   <button class="tgl" id="btnReport" title="Generate printable weekly report">REPORT</button>
-  <label class="ctl">Account ₹ <input type="text" id="avTop" style="width:110px;text-align:right"></label>
+  <label class="ctl">Capital ₹ <input type="text" id="avTop" style="width:105px;text-align:right"></label>
+  <label class="ctl" id="lvBox">
+    <span id="lvLabel">F&amp;O margin %</span>
+    <select id="lvSel"></select>
+  </label>
   <span id="status"></span>
 </div>
 
@@ -153,7 +157,7 @@
     <div id="tblWrap">
       <table>
         <thead><tr id="thRow">
-          <th>#</th><th>Symbol</th><th>Momo</th><th>LTP</th><th>1D%</th><th>ATR20</th><th>Shares</th><th>Status</th>
+          <th>#</th><th>Symbol</th><th>Momo</th><th>LTP</th><th>1D%</th><th>ATR20</th><th id="thQty">Lots</th><th>Status</th>
         </tr></thead>
         <tbody id="tbody"></tbody>
       </table>
@@ -203,6 +207,7 @@ async function loadUniverse() {
     if (j.universe && j.universe.length > 50) {
       UNIVERSE = j.universe;
       S.lists = { fno: j.fno || [], mtf: j.mtf3 || [] };
+      S.lots = j.lots || {};
     }
   } catch (_) {}
 }
@@ -211,6 +216,7 @@ const MAX_CHARTS = 12, METRICS_TTL = 4 * 60 * 1000, IST_OFF = 19800;
 const S = {
   count: 6, range: "5d", interval: "5m", clip: true, refreshSec: 60, timer: null,
   basket: "fno", lists: { fno: [], mtf: [] }, acct: { fno: 1000000, mtf: 1000000 },
+  lots: {}, marginPct: 20, leverage: 3,
   metrics: {}, metricsTime: 0, charts: {}, rows: [],
   showVol: true, showS20: false, showS50: false,
   apiOk: null, modalSym: null, snapIntraday: null, snapTime: 0, view: "charts",
@@ -380,22 +386,52 @@ function computePortfolio(basket) {
   const ms = Object.values(S.metrics).filter(m => m.momo != null && m.last && member.has(m.sym));
   const ranked = [...ms].sort((a, b2) => b2.momo - a.momo);
   const topN = Math.ceil(ranked.length * 0.2);   // book: only hold the top 20% of the ranking
-  const av = S.acct[b];
-  let cash = av;
+  const av = S.acct[b];                          // your own money
+  const isFno = b === "fno";
+  // Buying power = the exposure your capital can actually carry.
+  //   F&O : capital is margin, so notional capacity = capital / margin%
+  //   MTF : capital × leverage
+  // Positions are risk-sized against buying power (10 bps of exposure per position),
+  // so the leverage actually gets used instead of sitting idle.
+  const budget = isFno ? av / (S.marginPct / 100) : av * S.leverage;
+  let free = budget;
   const holdings = [];
+  let notional = 0, margin = 0, skipped = 0;
+
   for (const m of ranked.slice(0, topN)) {
     if (!m.qual || !m.atr20) continue;
-    const shares = Math.floor(av * 0.001 / m.atr20);   // AccountValue × 0.001 / ATR20
-    if (shares < 1) continue;
-    const cost = shares * m.last;
-    if (cost > cash) continue;
-    holdings.push({ ...m, shares, cost, wt: cost / av * 100 });
-    cash -= cost;
-    if (cash < av * 0.02) break;
+    const riskShares = Math.floor(budget * 0.001 / m.atr20);   // BuyingPower × 0.001 / ATR20
+    if (riskShares < 1) continue;
+    let h;
+    if (isFno) {
+      const lot = S.lots[m.sym];
+      if (!lot) continue;                                       // no lot size → not tradable as futures
+      const lots = Math.round(riskShares / lot);
+      if (lots < 1) { skipped++; continue; }                     // one lot would blow past the risk unit
+      const qty = lots * lot;
+      const notl = qty * m.last;
+      const marg = notl * S.marginPct / 100;
+      if (notl > free) continue;
+      h = { ...m, lot, lots, shares: qty, notional: notl, margin: marg, cost: marg, wt: notl / budget * 100 };
+      free -= notl; notional += notl; margin += marg;
+    } else {
+      const qty = riskShares;
+      const cost = qty * m.last;
+      if (cost > free) continue;
+      h = { ...m, shares: qty, cost, notional: cost, margin: cost / S.leverage, wt: cost / budget * 100 };
+      free -= cost; notional += cost; margin += cost / S.leverage;
+    }
+    holdings.push(h);
+    if (free < budget * 0.02) break;
   }
   const held = new Set(holdings.map(h => h.sym));
   const rankedOut = ranked.map((m, i) => ({ ...m, rank: i + 1, hold: held.has(m.sym) }));
-  return { basket: b, label: BASKET_LABEL[b], ranked: rankedOut, holdings, cash, topN, av, invested: av - cash };
+  return {
+    basket: b, label: BASKET_LABEL[b], ranked: rankedOut, holdings, topN, av, isFno, skipped,
+    budget, cash: free, deployed: budget - free, notional, margin,
+    invested: budget - free,
+    grossLev: notional / av
+  };
 }
 function rankedRows() { return computePortfolio().ranked; }
 function chartPicks() { return computePortfolio().holdings.slice(0, S.count); }
@@ -586,8 +622,13 @@ function renderTable(liveSet) {
   const tb = document.getElementById("tbody");
   const t = document.getElementById("sideTitle");
   if (t) t.textContent = `Momentum Ranking — ${BASKET_LABEL[S.basket]} (${(S.rows || []).length})`;
+  const isFno = S.basket === "fno";
+  const thq = document.getElementById("thQty");
+  if (thq) thq.textContent = isFno ? "Lots" : "Shares";
+  const hMap = Object.fromEntries(computePortfolio().holdings.map(h => [h.sym, h]));
   tb.innerHTML = (S.rows || []).map(r => {
-    const sh = r.atr20 ? Math.floor(S.acct[S.basket] * 0.001 / r.atr20) : 0;
+    const h = hMap[r.sym];
+    const sh = h ? (isFno ? h.lots : h.shares) : 0;
     const st = r.hold ? '<span style="color:var(--green);font-weight:700">HOLD</span>'
              : !r.qual ? `<span class="qn" title="${r.above100 === false ? "below 100 DMA" : "gap > 15%"}">excl</span>`
              : '<span style="color:var(--muted)">–</span>';
@@ -596,7 +637,7 @@ function renderTable(liveSet) {
       <td>${r.momo == null ? "–" : r.momo.toFixed(1)}</td><td>${fmt(r.last)}</td>
       <td class="${cls(r.d1)}">${pc(r.d1)}</td>
       <td>${r.atr20 ? r.atr20.toFixed(1) : "–"}</td>
-      <td>${r.hold ? sh.toLocaleString("en-IN") : "–"}</td><td>${st}</td>
+      <td>${sh ? `<b style="color:var(--accent)">${sh.toLocaleString("en-IN")}</b>` : "–"}</td><td>${st}</td>
     </tr>`;
   }).join("");
   tb.querySelectorAll("tr").forEach(tr => tr.onclick = () => openModal(tr.dataset.s));
@@ -608,7 +649,7 @@ function renderStrip() {
   const head = (idx
     ? `<span class="chip" style="border-color:${idx.positive ? "var(--green)" : "var(--red)"}"><span class="sym">NIFTY ${idx.positive ? "▲ above" : "▼ below"} 200DMA</span><span class="${idx.positive ? "up" : "down"}">${idx.positive ? "buys ON" : "buys OFF"}</span></span>`
     : "")
-    + `<span class="chip" style="border-color:${S.basket === "fno" ? "var(--accent)" : "#9b59b6"}"><span class="sym">${p.label}</span><span style="color:var(--muted)">${p.holdings.length} pos</span></span>`;
+    + `<span class="chip" style="border-color:${S.basket === "fno" ? "var(--accent)" : "#9b59b6"}"><span class="sym">${p.label}</span><span style="color:var(--muted)">${p.holdings.length} pos · ${p.isFno ? p.holdings.reduce((s, h) => s + h.lots, 0) + " lots" : cr(p.notional) + " exp"} · ${p.grossLev.toFixed(1)}×</span></span>`;
   document.getElementById("strip").innerHTML = head + p.holdings.map(r =>
     `<span class="chip" data-s="${r.sym}"><span class="sym">${r.sym}</span><span class="${cls(r.d1)}">${pc(r.d1)}</span><span style="color:var(--muted)">${r.shares.toLocaleString("en-IN")}sh</span></span>`).join("");
   document.querySelectorAll("#strip .chip[data-s]").forEach(c => c.onclick = () => openModal(c.dataset.s));
@@ -741,11 +782,25 @@ async function ensureIndexInfo() {
 
 const P2 = v => v == null ? "–" : (v >= 0 ? "+" : "") + v.toFixed(1);
 
+const cr = v => "₹" + (Math.abs(v) >= 1e7 ? (v / 1e7).toFixed(2) + " cr" : (v / 1e5).toFixed(2) + " L");
+
 function basketBlock(p) {
-  const portRows = p.holdings.map((m, i) => `
+  const head = p.isFno
+    ? `<th>#</th><th style="text-align:left">Symbol</th><th>LTP</th><th>Lot</th><th>LOTS</th><th>Qty</th><th>Notional</th><th>Margin</th><th>ATR20</th><th>Momo</th>`
+    : `<th>#</th><th style="text-align:left">Symbol</th><th>LTP</th><th>Shares</th><th>Exposure</th><th>Own funds</th><th>Weight</th><th>ATR20</th><th>Momo</th>`;
+  const portRows = p.holdings.map((m, i) => p.isFno ? `
+    <tr><td>${i + 1}</td><td><b>${m.sym}</b></td><td style="text-align:right">${fmt(m.last)}</td>
+    <td style="text-align:right;color:var(--muted)">${m.lot}</td>
+    <td style="text-align:right"><b style="color:var(--accent);font-size:13px">${m.lots}</b></td>
+    <td style="text-align:right;color:var(--muted)">${m.shares.toLocaleString("en-IN")}</td>
+    <td style="text-align:right">₹${fmt(Math.round(m.notional))}</td>
+    <td style="text-align:right">₹${fmt(Math.round(m.margin))}</td>
+    <td style="text-align:right">${m.atr20.toFixed(1)}</td>
+    <td style="text-align:right">${P2(m.momo)}</td></tr>` : `
     <tr><td>${i + 1}</td><td><b>${m.sym}</b></td><td style="text-align:right">${fmt(m.last)}</td>
     <td style="text-align:right"><b>${m.shares.toLocaleString("en-IN")}</b></td>
-    <td style="text-align:right">₹${fmt(Math.round(m.cost))}</td>
+    <td style="text-align:right">₹${fmt(Math.round(m.notional))}</td>
+    <td style="text-align:right;color:var(--muted)">₹${fmt(Math.round(m.margin))}</td>
     <td style="text-align:right">${m.wt.toFixed(1)}%</td>
     <td style="text-align:right">${m.atr20.toFixed(1)}</td>
     <td style="text-align:right">${P2(m.momo)}</td></tr>`).join("");
@@ -755,13 +810,24 @@ function basketBlock(p) {
     <td class="${m.above100 ? "qy" : "qn"}" style="text-align:center">${m.above100 ? "✓" : "✗"}</td>
     <td class="${m.gap90 <= 15 ? "qy" : "qn"}" style="text-align:right">${m.gap90 == null ? "–" : m.gap90.toFixed(1) + "%"}</td>
     <td class="${m.qual ? "qy" : "qn"}" style="text-align:center">${m.qual ? "QUALIFIED" : "excluded"}</td></tr>`).join("");
+  const totalLots = p.holdings.reduce((s, h) => s + (h.lots || 0), 0);
+  const stat = (lbl, val, hi) => `<span style="margin-right:20px;font-size:11px;color:var(--muted)">${lbl} <b style="color:${hi || "var(--text)"};font-size:13px">${val}</b></span>`;
+  const summary = p.isFno
+    ? stat("Capital (margin)", cr(p.av)) + stat("Notional capacity @" + S.marginPct + "%", cr(p.budget), "var(--accent)") +
+      stat("Total LOTS", totalLots, "var(--accent)") +
+      stat("Notional exposure", cr(p.notional), "var(--green)") + stat("Margin used", cr(p.margin)) +
+      stat("Effective leverage", p.grossLev.toFixed(2) + "×", "var(--green)") + stat("Unused capacity", cr(p.cash)) +
+      (p.skipped ? stat("Skipped (lot &gt; risk unit)", p.skipped, "var(--red)") : "")
+    : stat("Own capital", cr(p.av)) + stat("Buying power @" + S.leverage + "×", cr(p.budget), "#c39bd3") +
+      stat("Exposure deployed", cr(p.notional), "var(--green)") +
+      stat("Effective leverage", p.grossLev.toFixed(2) + "×", "var(--green)") +
+      stat("Own funds used", cr(p.margin)) + stat("Unused buying power", cr(p.cash));
   return `
   <div class="ins-card wide" style="border-color:${p.basket === "fno" ? "var(--accent)" : "#9b59b6"}">
-    <h3 style="color:${p.basket === "fno" ? "var(--accent)" : "#c39bd3"}">${p.label} PORTFOLIO — ${p.holdings.length} positions ·
-      ₹${fmt(Math.round(p.invested))} invested (${(p.invested / p.av * 100).toFixed(0)}%) · ₹${fmt(Math.round(p.cash))} cash ·
-      capital ₹${p.av.toLocaleString("en-IN")}</h3>
-    <table class="rot"><thead><tr><th>#</th><th style="text-align:left">Symbol</th><th>LTP</th><th>Shares</th><th>Value</th><th>Weight</th><th>ATR20</th><th>Momo</th></tr></thead>
-    <tbody>${portRows || `<tr><td colspan="8" style="color:var(--muted)">No qualifying stocks in the ${p.label} universe right now.</td></tr>`}</tbody></table>
+    <h3 style="color:${p.basket === "fno" ? "var(--accent)" : "#c39bd3"}">${p.label} PORTFOLIO — ${p.holdings.length} positions</h3>
+    <div style="margin:-4px 0 10px">${summary}</div>
+    <table class="rot"><thead><tr>${head}</tr></thead>
+    <tbody>${portRows || `<tr><td colspan="10" style="color:var(--muted)">No qualifying stocks in the ${p.label} universe right now.</td></tr>`}</tbody></table>
     <details style="margin-top:10px"><summary style="cursor:pointer;font-size:11px;color:var(--muted)">Momentum ranking — top 20 of ${p.ranked.length} (holds top ${p.topN})</summary>
       <table class="rot" style="margin-top:6px"><thead><tr><th>#</th><th style="text-align:left">Symbol</th><th>Momo</th><th>LTP</th><th>&gt;100DMA</th><th>Max Gap 90d</th><th>Status</th></tr></thead>
       <tbody>${rankRows}</tbody></table>
@@ -788,10 +854,16 @@ function renderPortfolio() {
     </div>
     ${basketBlock(fno)}
     ${basketBlock(mtf)}
-    <div class="ins-card wide" style="font-size:10px;color:var(--muted)">
-      Both baskets use identical rules: rank by annualized 90-day exponential regression slope × R²; hold only the top 20% of that basket's ranking;
-      disqualify anything below its 100 DMA or with a 90-day gap &gt; 15%; size each position as Capital × 0.001 / ATR20 (10 bps daily risk);
-      open new positions only when NIFTY is above its 200 DMA. Rankings and capital are independent per basket.
+    <div class="ins-card wide" style="font-size:10px;color:var(--muted);line-height:1.6">
+      <b style="color:var(--text)">Shared rules:</b> rank by annualized 90-day exponential regression slope × R²; hold only the top 20% of that basket's ranking;
+      disqualify anything below its 100 DMA or with a 90-day gap &gt; 15%; risk-size each position as Capital × 0.001 / ATR20 (10 bps daily risk per position);
+      open new positions only when NIFTY is above its 200 DMA.<br>
+      <b style="color:var(--text)">Sizing base:</b> positions are risk-sized against <i>buying power</i>, not bare capital, so the leverage actually gets deployed.
+      F&amp;O notional capacity = capital ÷ ${S.marginPct}% margin; MTF buying power = capital × ${S.leverage}×. Risk is 10 bps of that exposure per position.<br>
+      <b style="color:var(--text)">F&amp;O:</b> the risk-sized quantity is rounded to the nearest whole <b>lot</b>. If even one lot would exceed the risk unit the name is
+      <b>skipped</b> rather than force-bought — with small capital many large-lot stocks drop out, which is the honest answer. Lot sizes are the NSE Aug-2026 cycle; re-check after each NSE revision.<br>
+      <b style="color:var(--text)">MTF:</b> sizing on ${S.leverage}× buying power means risk per position is 10 bps of exposure ≈ ${(S.leverage * 10).toFixed(0)} bps of your own equity —
+      leverage amplifies both exposure and drawdown. Interest on the borrowed portion is not modelled.<br>
       Educational screening tool — not investment advice.
     </div>
   </div>`;
@@ -812,12 +884,17 @@ function buildReport() {
   const row = m => `<tr><td><b>${m.sym}</b></td><td style="text-align:right">${F(m.last)}</td><td style="text-align:right;${col(m.d1)}">${P(m.d1)}</td><td style="text-align:right;${col(m.m1)}">${P(m.m1)}</td><td style="text-align:right">${m.rsi == null ? "–" : m.rsi.toFixed(0)}</td><td style="text-align:right">${m.adr == null ? "–" : m.adr.toFixed(1) + "%"}</td><td style="text-align:right">${m.tov == null ? "–" : "₹" + F(Math.round(m.tov)) + " cr"}</td><td>${setupTxt(m)}</td></tr>`;
   const head = `<tr><th style="text-align:left">Symbol</th><th>LTP</th><th>1D%</th><th>1M%</th><th>RSI</th><th>ADR%</th><th>Avg T/O</th><th style="text-align:left">Setup</th></tr>`;
   const idx = S.indexInfo;
-  const prow = (m, i) => `<tr><td>${i + 1}</td><td><b>${m.sym}</b></td><td style="text-align:right">${F(m.last)}</td><td style="text-align:right"><b>${m.shares.toLocaleString("en-IN")}</b></td><td style="text-align:right">₹${F(Math.round(m.cost))}</td><td style="text-align:right">${m.wt.toFixed(1)}%</td><td style="text-align:right">${m.atr20.toFixed(1)}</td><td style="text-align:right">${m.momo.toFixed(1)}</td></tr>`;
+  const prowF = (m, i) => `<tr><td>${i + 1}</td><td><b>${m.sym}</b></td><td style="text-align:right">${F(m.last)}</td><td style="text-align:right">${m.lot}</td><td style="text-align:right"><b>${m.lots}</b></td><td style="text-align:right">${m.shares.toLocaleString("en-IN")}</td><td style="text-align:right">₹${F(Math.round(m.notional))}</td><td style="text-align:right">₹${F(Math.round(m.margin))}</td><td style="text-align:right">${m.momo.toFixed(1)}</td></tr>`;
+  const prowM = (m, i) => `<tr><td>${i + 1}</td><td><b>${m.sym}</b></td><td style="text-align:right">${F(m.last)}</td><td style="text-align:right"><b>${m.shares.toLocaleString("en-IN")}</b></td><td style="text-align:right">₹${F(Math.round(m.notional))}</td><td style="text-align:right">₹${F(Math.round(m.margin))}</td><td style="text-align:right">${m.wt.toFixed(1)}%</td><td style="text-align:right">${m.momo.toFixed(1)}</td></tr>`;
   const rrow = m => `<tr><td>${m.rank}</td><td><b>${m.sym}</b></td><td style="text-align:right">${m.momo.toFixed(1)}</td><td style="text-align:right">${F(m.last)}</td><td style="text-align:center">${m.above100 ? "Y" : "N"}</td><td style="text-align:right">${m.gap90 == null ? "–" : m.gap90.toFixed(1) + "%"}</td><td>${m.qual ? "qualified" : "excluded"}</td></tr>`;
   const block = p => `
-<h2>${p.label} Portfolio — ${p.holdings.length} positions</h2>
-<p class="sub">Capital ₹${F(p.av)} · Invested ₹${F(Math.round(p.invested))} (${(p.invested / p.av * 100).toFixed(0)}%) · Cash ₹${F(Math.round(p.cash))} · Universe ${p.ranked.length} stocks</p>
-<table><tr><th>#</th><th style="text-align:left">Symbol</th><th>LTP</th><th>Shares</th><th>Value</th><th>Weight</th><th>ATR20</th><th>Momo</th></tr>${p.holdings.map(prow).join("") || '<tr><td colspan="8">No qualifying stocks.</td></tr>'}</table>
+<h2>${p.label} Portfolio — ${p.holdings.length} positions${p.isFno ? ` · ${p.holdings.reduce((s, h) => s + h.lots, 0)} lots total` : ""}</h2>
+<p class="sub">${p.isFno
+  ? `Capital (margin) ₹${F(p.av)} · Notional exposure ₹${F(Math.round(p.notional))} · Margin used ₹${F(Math.round(p.margin))} @ ${S.marginPct}% · Effective leverage ${p.grossLev.toFixed(2)}× · Free margin ₹${F(Math.round(p.cash))}`
+  : `Own capital ₹${F(p.av)} · Buying power @${S.leverage}× ₹${F(Math.round(p.budget))} · Exposure deployed ₹${F(Math.round(p.notional))} · Effective leverage ${p.grossLev.toFixed(2)}× · Unused ₹${F(Math.round(p.cash))}`} · Universe ${p.ranked.length} stocks</p>
+<table>${p.isFno
+  ? `<tr><th>#</th><th style="text-align:left">Symbol</th><th>LTP</th><th>Lot</th><th>LOTS</th><th>Qty</th><th>Notional</th><th>Margin</th><th>Momo</th></tr>${p.holdings.map(prowF).join("") || '<tr><td colspan="9">No qualifying stocks.</td></tr>'}`
+  : `<tr><th>#</th><th style="text-align:left">Symbol</th><th>LTP</th><th>Shares</th><th>Exposure</th><th>Own funds</th><th>Weight</th><th>Momo</th></tr>${p.holdings.map(prowM).join("") || '<tr><td colspan="8">No qualifying stocks.</td></tr>'}`}</table>
 <h3 style="font-size:12px;margin:12px 0 4px">${p.label} — momentum ranking, top 20</h3>
 <table><tr><th>#</th><th style="text-align:left">Symbol</th><th>Momo</th><th>LTP</th><th>&gt;100DMA</th><th>Max Gap 90d</th><th style="text-align:left">Status</th></tr>${p.ranked.slice(0, 20).map(rrow).join("")}</table>`;
   const pf = computePortfolio("fno"), pm = computePortfolio("mtf");
@@ -911,14 +988,30 @@ function init() {
     S.rows = rankedRows(); renderTable(new Set([...pool.keys()])); renderStrip();
     if (S.view === "portfolio") renderPortfolio(); else if (S.view === "charts") refresh();
   };
+  const lvSel = document.getElementById("lvSel");
+  const syncLv = () => {
+    const fno = S.basket === "fno";
+    document.getElementById("lvLabel").textContent = fno ? "F&O margin %" : "MTF leverage";
+    lvSel.innerHTML = "";
+    if (fno) { for (const v of [12, 15, 18, 20, 25, 30, 40]) lvSel.add(new Option(v + "%", v)); lvSel.value = S.marginPct; }
+    else { for (const v of [2, 2.5, 3, 4, 5]) lvSel.add(new Option(v + "×", v)); lvSel.value = S.leverage; }
+  };
+  const repaint = () => {
+    S.rows = rankedRows(); renderTable(new Set([...pool.keys()])); renderStrip();
+    if (S.view === "portfolio") renderPortfolio(); else if (S.view === "charts") refresh();
+  };
+  lvSel.onchange = e => {
+    const v = parseFloat(e.target.value);
+    if (S.basket === "fno") S.marginPct = v; else S.leverage = v;
+    try { localStorage.setItem("mp_lev", JSON.stringify({ m: S.marginPct, l: S.leverage })) } catch (_) {}
+    repaint();
+  };
   document.querySelectorAll("#basketSeg button").forEach(b => b.onclick = () => {
     document.querySelectorAll("#basketSeg button").forEach(x => x.classList.remove("on"));
     b.classList.add("on");
     S.basket = b.dataset.b;
     try { localStorage.setItem("mp_basket", S.basket) } catch (_) {}
-    syncAv();
-    S.rows = rankedRows(); renderTable(new Set([...pool.keys()])); renderStrip();
-    if (S.view === "portfolio") renderPortfolio(); else if (S.view === "charts") refresh();
+    syncAv(); syncLv(); repaint();
   });
   document.getElementById("btnReport").onclick = buildReport;
   document.getElementById("modalClose").onclick = closeModal;
@@ -940,7 +1033,11 @@ function init() {
 
   window.addEventListener("resize", () => { clearTimeout(rT); rT = setTimeout(() => render(chartPicks(S.rows)), 200); });
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
-  syncAv();
+  try {
+    const lv = JSON.parse(localStorage.getItem("mp_lev") || "null");
+    if (lv) { if (lv.m > 0) S.marginPct = lv.m; if (lv.l > 0) S.leverage = lv.l; }
+  } catch (_) {}
+  syncAv(); syncLv();
   marketStatus(); setInterval(marketStatus, 30000);
   loadUniverse().then(() => { ensureIndexInfo(); refresh(); schedule(); });
 }
