@@ -1,6 +1,6 @@
 // Combined market data endpoint: fetches all symbols from Yahoo in parallel
 // server-side and returns ONE payload. Edge-cached so repeat loads are instant.
-const OK_SYM = /^[A-Z0-9&.\-]{1,20}$/i;
+const OK_SYM = /^[A-Z0-9&.\-^]{1,20}$/i;
 const OK_TOKEN = /^[0-9a-z]{1,5}$/;
 
 export default async function handler(req, res) {
@@ -13,7 +13,7 @@ export default async function handler(req, res) {
   const H = { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", "Accept": "application/json" };
   const out = {};
   await Promise.all(syms.map(async s => {
-    const sym = s.includes(".") ? s : s + ".NS";
+    const sym = s.startsWith("^") || s.includes(".") ? s : s + ".NS";
     try {
       const r = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?range=${range}&interval=${interval}&includePrePost=false`, { headers: H });
       if (!r.ok) return;

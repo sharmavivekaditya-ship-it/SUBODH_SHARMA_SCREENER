@@ -16,7 +16,7 @@ const H = { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Apple
 
 async function yChart(s, range, interval) {
   try {
-    const sym = s.includes(".") ? s : s + ".NS";
+    const sym = s.startsWith("^") || s.includes(".") ? s : s + ".NS";
     const r = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?range=${range}&interval=${interval}&includePrePost=false`, { headers: H });
     if (!r.ok) return null;
     const j = await r.json();
@@ -77,6 +77,36 @@ function setupExtras(cl, hi, lo, vo) {
   return out;
 }
 
+function momoExtras(cl, hi, lo, op) {
+  const n = cl.length;
+  const out = { momo: null, atr20: null, above100: null, gap90: null, qual: false };
+  if (n < 40) return out;
+  const win = cl.slice(-90), m = win.length;
+  const ys = win.map(Math.log);
+  let sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (let i = 0; i < m; i++) { sx += i; sy += ys[i]; sxx += i * i; sxy += i * ys[i]; }
+  const slope = (m * sxy - sx * sy) / (m * sxx - sx * sx);
+  const icpt = (sy - slope * sx) / m, ym = sy / m;
+  let ssr = 0, sst = 0;
+  for (let i = 0; i < m; i++) { const f = icpt + slope * i; ssr += (ys[i] - f) ** 2; sst += (ys[i] - ym) ** 2; }
+  const r2 = sst > 0 ? Math.max(0, 1 - ssr / sst) : 0;
+  out.momo = (Math.exp(slope * 250) - 1) * 100 * r2;
+  let atr = 0;
+  for (let i = n - 20; i < n; i++)
+    atr += Math.max(hi[i] - lo[i], Math.abs(hi[i] - cl[i - 1]), Math.abs(lo[i] - cl[i - 1]));
+  out.atr20 = atr / 20;
+  let g = 0;
+  for (let i = Math.max(1, n - 90); i < n; i++) {
+    const gap = Math.abs((op[i] || cl[i]) / cl[i - 1] - 1) * 100;
+    if (gap > g) g = gap;
+  }
+  out.gap90 = g;
+  const s100 = n >= 100 ? cl.slice(-100).reduce((a, b) => a + b, 0) / 100 : null;
+  out.above100 = s100 != null ? cl[n - 1] > s100 : null;
+  out.qual = !!(out.above100 && g <= 15);
+  return out;
+}
+
 export default async function handler(req, res) {
   if (process.env.REFRESH_TOKEN && req.query.token !== process.env.REFRESH_TOKEN)
     return res.status(401).json({ error: "unauthorized" });
@@ -86,17 +116,29 @@ export default async function handler(req, res) {
     return { ...d, t: d.t.slice(s), o: d.o.slice(s), h: d.h.slice(s), l: d.l.slice(s), c: d.c.slice(s), v: d.v.slice(s) };
   };
   const daily = {}, intraday = {};
-  await Promise.all(UNIVERSE.map(async s => {
-    const [d, i] = await Promise.all([yChart(s, "1y", "1d"), yChart(s, "5d", "5m")]);
-    if (d) daily[s] = d;
-    if (i) intraday[s] = trim(i);
-  }));
+  let index = null;
+  await Promise.all([
+    ...UNIVERSE.map(async s => {
+      const [d, i] = await Promise.all([yChart(s, "1y", "1d"), yChart(s, "5d", "5m")]);
+      if (d) daily[s] = d;
+      if (i) intraday[s] = trim(i);
+    }),
+    (async () => {
+      const d = await yChart("^NSEI", "1y", "1d");
+      if (d) {
+        const cl = d.c.filter(x => x != null);
+        const s200 = cl.length >= 200 ? cl.slice(-200).reduce((a, b) => a + b, 0) / 200 : null;
+        const last = d.meta.last ?? cl[cl.length - 1];
+        index = { last, sma200: s200, positive: s200 != null ? last > s200 : null };
+      }
+    })()
+  ]);
 
   const metrics = {};
   for (const [sym, d] of Object.entries(daily)) {
-    const cl = [], hh = [], ll = [], vv = [];
+    const cl = [], hh = [], ll = [], vv = [], oo = [];
     for (let i = 0; i < d.c.length; i++) if (d.c[i] != null) {
-      cl.push(d.c[i]); hh.push(d.h[i] ?? d.c[i]); ll.push(d.l[i] ?? d.c[i]); vv.push(d.v[i] || 0);
+      cl.push(d.c[i]); hh.push(d.h[i] ?? d.c[i]); ll.push(d.l[i] ?? d.c[i]); vv.push(d.v[i] || 0); oo.push(d.o[i] ?? d.c[i]);
     }
     if (cl.length < 2) continue;
     const last = d.meta.last ?? cl[cl.length - 1];
@@ -110,11 +152,12 @@ export default async function handler(req, res) {
       rsi: rsi14(cl),
       a20: s20v != null ? last > s20v : null, a50: s50v != null ? last > s50v : null, a200: s200v != null ? last > s200v : null,
       hi52: (last / Math.max(...cl) - 1) * 100,
-      ...setupExtras(cl, hh, ll, vv)
+      ...setupExtras(cl, hh, ll, vv),
+      ...momoExtras(cl, hh, ll, oo)
     };
   }
 
-  const snap = { ts: Date.now(), metrics, intraday };
+  const snap = { ts: Date.now(), metrics, intraday, index };
   const url = process.env.UPSTASH_REDIS_REST_URL, tok = process.env.UPSTASH_REDIS_REST_TOKEN;
   let stored = false;
   if (url && tok) {
