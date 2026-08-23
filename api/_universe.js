@@ -64,9 +64,23 @@ export const INDEX_LOTS = { NIFTY: 65, BANKNIFTY: 30, FINNIFTY: 60, MIDCPNIFTY: 
 // F&O basket = every symbol with a market lot.
 export const FNO = Object.keys(LOTS).sort();
 
-// Liquid non-F&O stocks commonly available at ~1:3 MTF margin.
-// (Names that were dropped from F&O in recent NSE reviews live here.)
-export const MTF3 = [
+// ---------------------------------------------------------------------------
+// MTF basket.
+//   RULE: a stock qualifies only if its broker MTF leverage is >= MIN_MTF_LEV.
+//         The leverage itself is NOT capped at 3 — each stock is traded at the
+//         maximum leverage the broker allows on it (5x if 5x is offered).
+//   MTF_LEV holds per-symbol max leverage. Anything not listed uses
+//   MTF_LEV_DEFAULT. Paste your broker's MTF list here to make this exact.
+// ---------------------------------------------------------------------------
+export const MIN_MTF_LEV = 3;
+export const MTF_LEV_DEFAULT = 4;     // placeholder until broker list is loaded
+export const MTF_LEV = {
+  // "RELIANCE": 5, "TATASTEEL": 4, ...  ← per-symbol overrides
+};
+export const mtfLev = s => MTF_LEV[s] ?? MTF_LEV_DEFAULT;
+
+// Candidate cash stocks (non-F&O). Filtered below by the >= MIN_MTF_LEV rule.
+const MTF_CANDIDATES = [
   "AARTIIND","ABBOTINDIA","ABFRL","ACC","AIAENG","AJANTPHARM","APARINDS","APOLLOTYRE",
   "ASTERDM","ATGL","ATUL","BALKRISIND","BALRAMCHIN","BASF","BATAINDIA","BAYERCROP",
   "BERGEPAINT","BLUEDART","BSOFT","CARBORUNIV","CASTROLIND","CEATLTD","CENTURYPLY","CERA",
@@ -86,6 +100,10 @@ export const MTF3 = [
   "TRIDENT","TRIVENI","TTKPRESTIG","UBL","UTIAMC","VGUARD","VIJAYA","VINATIORGA","WELCORP",
   "WELSPUNLIV","WHIRLPOOL","ZENSARTECH","ZFCVINDIA"
 ];
+
+// Universe rule: keep only stocks offering at least MIN_MTF_LEV.
+export const MTF3 = MTF_CANDIDATES.filter(s => mtfLev(s) >= MIN_MTF_LEV).sort();
+export const MTF_LEV_MAP = Object.fromEntries(MTF3.map(s => [s, mtfLev(s)]));
 
 export const UNIVERSE = [...new Set([...FNO, ...MTF3])];
 export default UNIVERSE;
