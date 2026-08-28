@@ -245,26 +245,35 @@ function volOf(cl, p = 63) {
   const sd = Math.sqrt(r.reduce((a, b) => a + (b - mu) ** 2, 0) / (r.length - 1));
   return sd * Math.sqrt(252) * 100;
 }
-/* VaRS — volatility-PENALISED relative strength.
-   A plain rs/vol divides correctly for gains but inverts for losses: at rs=-20,
-   vol 60 scores -33 while vol 15 scores -133, i.e. the wildest loser ranks best.
-   So the penalty is applied sign-aware: volatility always pushes a score toward
-   (and past) zero — it shrinks gains and deepens losses.
-        rs >= 0 :  rs x (REF_VOL / vol)      high vol -> smaller gain
-        rs <  0 :  rs x (vol / REF_VOL)      high vol -> deeper loss
-   REF_VOL is a neutral reference so VaRS stays in familiar "%" units:
-   a stock at exactly REF_VOL volatility has VaRS == its raw RS. */
-const REF_VOL = 30;
+/* VaRS — the RS rating (1-99), adjusted for volatility.
+   RS is already a percentile, so it is always positive and direction is baked in
+   (weak stocks sit at 1-20). A plain volatility divide is therefore safe and
+   monotonic — no sign handling needed.
+        VaRS = RS x (REF_VOL / vol)
+   REF_VOL is the neutral anchor: a stock at REF_VOL volatility keeps its RS
+   unchanged, calmer stocks score above it, choppier ones below.
+
+   It is a constant applied to every stock, so it CANNOT change the ranking —
+   it only sets the scale of the printed number. Rather than pick an arbitrary
+   figure, it is anchored to the universe's own MEDIAN volatility, so
+   "VaRS > RS" reads as "calmer than the typical stock right now", and the
+   anchor re-calibrates itself as the market's volatility regime shifts. */
+let REF_VOL = 30;                    // fallback until the universe is measured
+function setRefVol(metrics) {
+  const v = Object.values(metrics).map(m => m.vol).filter(x => x > 0).sort((a, b) => a - b);
+  if (v.length > 20) REF_VOL = v[Math.floor(v.length / 2)];
+  return REF_VOL;
+}
 function varsOf(rs, vol) {
   if (rs == null || !(vol > 0)) return null;
-  return rs >= 0 ? rs * (REF_VOL / vol) : rs * (vol / REF_VOL);
+  return rs * (REF_VOL / vol);
 }
 // AtVaRS = VaRS × ATR%            → then rewards big daily range
 // AtMVaRS= AtVaRS × MTF leverage  → then rewards margin availability
 function derivedScores(m, levFn) {
   const out = {};
-  if (m.rsRaw != null && m.vol > 0) {
-    out.vars = varsOf(m.rsRaw, m.vol);
+  if (m.rs != null && m.vol > 0) {
+    out.vars = varsOf(m.rs, m.vol);            // m.rs is the 1-99 rating
     const atrPct = m.atr20 && m.last ? m.atr20 / m.last * 100 : null;
     if (atrPct) {
       out.atvars = out.vars * atrPct;
@@ -439,6 +448,7 @@ async function loadMetrics(force) {
   }
   if (!Object.keys(m).length) throw new Error("metrics failed");
   assignRS(m);
+  setRefVol(m);                      // anchor VaRS to the universe's median vol
   const lf = s => S.mtfLev[s] || S.mtfLevDefault;
   for (const k of Object.keys(m)) Object.assign(m[k], derivedScores(m[k], lf));
   S.metrics = m; S.metricsTime = Date.now();
@@ -544,6 +554,7 @@ async function loadSnapshot() {
     S.metrics = j.metrics; S.metricsTime = j.ts;
     S.snapIntraday = j.intraday || null; S.snapTime = j.ts;
     if (j.index) S.indexInfo = j.index;
+    if (j.refVol > 0) REF_VOL = j.refVol; else setRefVol(j.metrics);
     try { localStorage.setItem("mp_metrics", JSON.stringify({ m: j.metrics, t: j.ts })) } catch (_) {}
     return true;
   } catch (_) { return false; }
@@ -884,7 +895,9 @@ function renderInsights() {
       <h3 style="margin:0">Market Insights — ${secRows.length} constructed sector indices · ${ms.length} stocks</h3>
       <div style="font-size:10px;color:var(--muted);margin-top:4px;line-height:1.6">
         Sector indices are equal-weighted composites of their constituents (NSE's own 400+ index feed isn't freely available).<br>
-        <b style="color:var(--text)">VaRS</b> = weighted RS (${RS_W.m1 * 100}% 1M + ${RS_W.m3 * 100}% 3M + ${RS_W.m6 * 100}% 6M) ÷ annualised return volatility.
+        <b style="color:var(--text)">RS</b> = 1–99 percentile of weighted growth (${RS_W.m1 * 100}% 1M + ${RS_W.m3 * 100}% 3M + ${RS_W.m6 * 100}% 6M) across the universe.
+        <b style="color:var(--text)">VaRS</b> = RS × (${REF_VOL.toFixed(0)} ÷ annualised volatility) — same rating, penalised for a choppy path.
+        The ${REF_VOL.toFixed(0)} is the universe's <i>median</i> volatility, so VaRS above RS = calmer than the typical stock. It scales the number, not the ranking.
         <b style="color:var(--text)">AtVaRS</b> = VaRS × ATR%. <b style="color:var(--text)">AtMVaRS</b> = AtVaRS × Zerodha MTF leverage.<br>
         <span style="color:#f5a623">Note:</span> these are <i>not</i> Clenow's measure. The two portfolios are ranked by
         <b style="color:var(--accent)">Momo</b> = annualised 90-day exponential regression slope × R², exactly as in <i>Stocks on the Move</i> —
