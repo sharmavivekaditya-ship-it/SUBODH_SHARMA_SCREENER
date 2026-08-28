@@ -1,4 +1,5 @@
 import { UNIVERSE, FNO, MTF3, LOTS, MTF_LEV_MAP, MIN_MTF_LEV, MTF_LEV_DEFAULT, MTF_LEV } from "./_universe.js";
+import { SECTOR_MAP } from "./_sectors.js";
 
 export default function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -7,6 +8,7 @@ export default function handler(req, res) {
     universe: UNIVERSE, fno: FNO, mtf3: MTF3, lots: LOTS,
     mtfLev: MTF_LEV_MAP, minMtfLev: MIN_MTF_LEV,
     mtfLevDefault: MTF_LEV_DEFAULT, mtfLevCustom: Object.keys(MTF_LEV).length,
+    sectors: SECTOR_MAP,
     count: UNIVERSE.length
   });
 }

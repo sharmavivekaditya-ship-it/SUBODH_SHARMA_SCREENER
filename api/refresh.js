@@ -2,7 +2,7 @@
 // series) and stores it in Upstash Redis (free KV). Ping this every minute during
 // market hours from cron-job.org — the app then loads instantly from /api/snapshot,
 // even for the first visitor of the day.
-import { UNIVERSE, FNO, MTF3 } from "./_universe.js";
+import { UNIVERSE, FNO, MTF3, mtfLev } from "./_universe.js";
 const H = { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", "Accept": "application/json" };
 
 async function yChart(s, range, interval) {
@@ -49,6 +49,14 @@ function assignRS(metrics) {
   const arr = Object.values(metrics).filter(m => m.rsRaw != null).sort((a, b) => a.rsRaw - b.rsRaw);
   const n = arr.length;
   arr.forEach((m, i) => { m.rs = n > 1 ? Math.round(i / (n - 1) * 98) + 1 : 50; });
+}
+function volOf(cl, p = 63) {
+  if (cl.length < p + 1) return null;
+  const r = [];
+  for (let i = cl.length - p; i < cl.length; i++) r.push(Math.log(cl[i] / cl[i - 1]));
+  const mu = r.reduce((a, b) => a + b, 0) / r.length;
+  const sd = Math.sqrt(r.reduce((a, b) => a + (b - mu) ** 2, 0) / (r.length - 1));
+  return sd * Math.sqrt(252) * 100;
 }
 
 function setupExtras(cl, hi, lo, vo) {
@@ -167,8 +175,19 @@ export default async function handler(req, res) {
       ...momoExtras(cl, hh, ll, oo)
     };
     metrics[sym].rsRaw = rsRawOf(metrics[sym]);
+    metrics[sym].vol = volOf(cl);
   }
   assignRS(metrics);
+  // VaRS / AtVaRS / AtMVaRS  (see index.html for the definitions)
+  for (const m of Object.values(metrics)) {
+    if (m.rsRaw == null || !(m.vol > 0)) continue;
+    m.vars = m.rsRaw / m.vol * 100;
+    const atrPct = m.atr20 && m.last ? m.atr20 / m.last * 100 : null;
+    if (atrPct) {
+      m.atvars = m.vars * atrPct;
+      m.atmvars = m.atvars * mtfLev(m.sym);
+    }
+  }
 
   // Intraday series only for names the charts will actually show:
   // top of the momentum ranking that passes the entry filters, per basket.

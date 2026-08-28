@@ -212,6 +212,11 @@ async function loadUniverse() {
       S.minMtfLev = j.minMtfLev || 3;
       S.mtfLevDefault = j.mtfLevDefault || 4;
       S.mtfLevExact = (j.mtfLevCustom || 0) > 0;
+      if (j.sectors) {
+        SECTORS = j.sectors;
+        SYM_SECTOR = {};
+        for (const [sec, list] of Object.entries(SECTORS)) for (const s of list) SYM_SECTOR[s] = sec;
+      }
     }
   } catch (_) {}
 }
@@ -230,6 +235,30 @@ function assignRS(metrics) {
   const arr = Object.values(metrics).filter(m => m.rsRaw != null).sort((a, b) => a.rsRaw - b.rsRaw);
   const n = arr.length;
   arr.forEach((m, i) => { m.rs = n > 1 ? Math.round(i / (n - 1) * 98) + 1 : 50; });
+}
+// Annualised volatility of daily returns (path smoothness) over `p` sessions.
+function volOf(cl, p = 63) {
+  if (cl.length < p + 1) return null;
+  const r = [];
+  for (let i = cl.length - p; i < cl.length; i++) r.push(Math.log(cl[i] / cl[i - 1]));
+  const mu = r.reduce((a, b) => a + b, 0) / r.length;
+  const sd = Math.sqrt(r.reduce((a, b) => a + (b - mu) ** 2, 0) / (r.length - 1));
+  return sd * Math.sqrt(252) * 100;
+}
+// VaRS   = weighted RS ÷ path volatility   → rewards SMOOTH strength
+// AtVaRS = VaRS × ATR%                     → then rewards big daily range
+// AtMVaRS= AtVaRS × MTF leverage           → then rewards margin availability
+function derivedScores(m, levFn) {
+  const out = {};
+  if (m.rsRaw != null && m.vol > 0) {
+    out.vars = m.rsRaw / m.vol * 100;
+    const atrPct = m.atr20 && m.last ? m.atr20 / m.last * 100 : null;
+    if (atrPct) {
+      out.atvars = out.vars * atrPct;
+      if (levFn) out.atmvars = out.atvars * levFn(m.sym);
+    }
+  }
+  return out;
 }
 
 const S = {
@@ -393,9 +422,12 @@ async function loadMetrics(force) {
       ...momoExtras(cl, hh, ll, oo)
     };
     m[sym].rsRaw = rsRawOf(m[sym]);
+    m[sym].vol = volOf(cl);
   }
   if (!Object.keys(m).length) throw new Error("metrics failed");
   assignRS(m);
+  const lf = s => S.mtfLev[s] || S.mtfLevDefault;
+  for (const k of Object.keys(m)) Object.assign(m[k], derivedScores(m[k], lf));
   S.metrics = m; S.metricsTime = Date.now();
   try { localStorage.setItem("mp_metrics", JSON.stringify({ m, t: Date.now() })) } catch (_) {}
 }
@@ -708,28 +740,114 @@ function renderStrip() {
   document.querySelectorAll("#strip .chip[data-s]").forEach(c => c.onclick = () => openModal(c.dataset.s));
 }
 
-/* ================= Insights view (Weekend Investing style breadth) ================= */
-const SECTORS = {
-  "Banks": ["HDFCBANK","ICICIBANK","SBIN","AXISBANK","KOTAKBANK","INDUSINDBK"],
-  "NBFC / Finance": ["BAJFINANCE","BAJAJFINSV","JIOFIN","SHRIRAMFIN","LICI","SBILIFE","HDFCLIFE"],
-  "IT": ["INFY","TCS","HCLTECH","WIPRO","TECHM"],
-  "Auto": ["MARUTI","M&M","TATAMOTORS","EICHERMOT","HEROMOTOCO","BAJAJ-AUTO"],
-  "Metals": ["TATASTEEL","JSWSTEEL","HINDALCO","VEDL"],
-  "Oil & Gas": ["RELIANCE","ONGC","IOC","BPCL","GAIL","COALINDIA"],
-  "Power": ["NTPC","POWERGRID"],
-  "FMCG": ["ITC","HINDUNILVR","NESTLEIND","BRITANNIA","TATACONSUM"],
-  "Consumer / Retail": ["TITAN","TRENT","DMART","ASIANPAINT","PIDILITIND"],
-  "Pharma / Health": ["SUNPHARMA","DRREDDY","CIPLA","APOLLOHOSP"],
-  "Infra / Cement": ["LT","ULTRACEMCO","GRASIM","AMBUJACEM","DLF","ADANIPORTS","ADANIENT"],
-  "Defence": ["BEL","HAL"],
-  "Telecom": ["BHARTIARTL"]
-};
+/* ================= Insights view ================= */
+let SECTORS = {}, SYM_SECTOR = {};
 function heat(v) {
   if (v == null) return "transparent";
   const a = Math.min(Math.abs(v) / 12, 0.75) + 0.08;
   return v >= 0 ? `rgba(38,166,154,${a})` : `rgba(239,83,80,${a})`;
 }
+/* ---- constructed sector indices: equal-weighted composite of member returns ---- */
+function sectorTable() {
+  const rows = [];
+  for (const [sec, list] of Object.entries(SECTORS)) {
+    const mm = list.map(s => S.metrics[s]).filter(m => m && m.m1 != null);
+    if (mm.length < 2) continue;
+    const avg = f => { const v = mm.map(f).filter(x => x != null); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
+    rows.push({
+      sec, n: mm.length,
+      m1: avg(m => m.m1), m3: avg(m => m.m3), m6: avg(m => m.m6),
+      vars: avg(m => m.vars), rs: avg(m => m.rs)
+    });
+  }
+  return rows;
+}
+function topSectors(rows, key, n = 5) {
+  return [...rows].filter(r => r[key] != null).sort((a, b) => b[key] - a[key]).slice(0, n);
+}
+
+function insightBlock(title, sub, cols, items, fmtRow, accent) {
+  return `<div class="ins-card wide" style="border-color:${accent}">
+    <h3 style="color:${accent}">${title}</h3>
+    ${sub ? `<div style="font-size:10px;color:var(--muted);margin:-6px 0 8px">${sub}</div>` : ""}
+    <table class="rot"><thead><tr>${cols}</tr></thead><tbody>
+    ${items.length ? items.map(fmtRow).join("") : `<tr><td colspan="9" style="color:var(--muted)">No data yet.</td></tr>`}
+    </tbody></table></div>`;
+}
+
 function renderInsights() {
+  const ms = Object.values(S.metrics);
+  const el = document.getElementById("insights");
+  if (!ms.length) { el.innerHTML = '<div id="msg"><span class="spin"></span>Loading…</div>'; return; }
+  const N = v => v == null ? "–" : (v >= 0 ? "+" : "") + v.toFixed(1) + "%";
+  const num = (v, d = 2) => v == null ? "–" : v.toFixed(d);
+  const secRows = sectorTable();
+  const t1 = topSectors(secRows, "m1"), t3 = topSectors(secRows, "m3"), t6 = topSectors(secRows, "m6");
+
+  // ---- 1. strongest sectors across 1M / 3M / 6M -------------------------------
+  const secCard = (label, list, key) => `
+    <div class="ins-card"><h3>Top 5 Sectors — ${label}</h3>
+      <table class="rot"><thead><tr><th style="text-align:left">Sector</th><th>${label}</th><th>n</th><th>VaRS</th></tr></thead>
+      <tbody>${list.map((r, i) => `<tr>
+        <td><b style="color:${i === 0 ? "var(--green)" : "var(--text)"}">${i + 1}. ${r.sec}</b></td>
+        <td style="background:${heat(r[key])}">${N(r[key])}</td>
+        <td style="color:var(--muted)">${r.n}</td>
+        <td>${num(r.vars)}</td></tr>`).join("")}</tbody></table></div>`;
+
+  // ---- 2. leaders inside the strongest sectors, ranked by VaRS ----------------
+  const leadSecs = [...new Set(t1.map(r => r.sec))];
+  const leaders = ms.filter(m => leadSecs.includes(SYM_SECTOR[m.sym]) && m.vars != null)
+    .sort((a, b) => b.vars - a.vars).slice(0, 10);
+
+  // ---- 3. AtVaRS in F&O, 4. AtMVaRS in MTF ------------------------------------
+  const fnoSet = new Set(S.lists.fno), mtfSet = new Set(S.lists.mtf);
+  const atv = ms.filter(m => fnoSet.has(m.sym) && m.atvars != null).sort((a, b) => b.atvars - a.atvars).slice(0, 10);
+  const atm = ms.filter(m => mtfSet.has(m.sym) && m.atmvars != null).sort((a, b) => b.atmvars - a.atmvars).slice(0, 10);
+  const atrP = m => m.atr20 && m.last ? m.atr20 / m.last * 100 : null;
+
+  el.innerHTML = `<div class="ins-grid">
+    <div class="ins-card wide" style="padding:10px 14px">
+      <h3 style="margin:0">Market Insights — ${secRows.length} constructed sector indices · ${ms.length} stocks</h3>
+      <div style="font-size:10px;color:var(--muted);margin-top:4px">
+        Sector indices are equal-weighted composites of their constituents (NSE's own 400+ index feed isn't freely available).
+        <b>VaRS</b> = weighted RS (${RS_W.m1 * 100}% 1M + ${RS_W.m3 * 100}% 3M + ${RS_W.m6 * 100}% 6M) ÷ annualised return volatility — rewards <i>smooth</i> strength.
+        <b>AtVaRS</b> = VaRS × ATR% — then rewards daily range. <b>AtMVaRS</b> = AtVaRS × Zerodha MTF leverage.
+      </div>
+    </div>
+    ${secCard("1M", t1, "m1")}
+    ${secCard("3M", t3, "m3")}
+    ${secCard("6M", t6, "m6")}
+    ${insightBlock("Sector Leaders — top 10 by VaRS inside the 5 strongest 1M sectors",
+      `Ranked on volatility-adjusted relative strength. Sectors: ${leadSecs.join(" · ")}`,
+      `<th>#</th><th style="text-align:left">Symbol</th><th style="text-align:left">Sector</th><th>LTP</th><th>1M</th><th>3M</th><th>6M</th><th>RS</th><th>Vol%</th><th>VaRS</th>`,
+      leaders, (m, i) => `<tr><td>${i + 1}</td><td><b>${m.sym}</b></td>
+        <td style="text-align:left;color:var(--muted);font-size:10px">${SYM_SECTOR[m.sym] || ""}</td>
+        <td>${fmt(m.last)}</td><td style="background:${heat(m.m1)}">${N(m.m1)}</td>
+        <td>${N(m.m3)}</td><td>${N(m.m6)}</td>
+        <td><b style="color:#4dd0e1">${m.rs ?? "–"}</b></td><td style="color:var(--muted)">${num(m.vol, 1)}</td>
+        <td><b style="color:var(--green)">${num(m.vars)}</b></td></tr>`, "var(--green)")}
+    ${insightBlock("Top 10 AtVaRS — F&O universe",
+      "VaRS × ATR%: smooth relative strength that also has the daily range to trade.",
+      `<th>#</th><th style="text-align:left">Symbol</th><th style="text-align:left">Sector</th><th>LTP</th><th>Lot</th><th>RS</th><th>Vol%</th><th>ATR%</th><th>VaRS</th><th>AtVaRS</th>`,
+      atv, (m, i) => `<tr><td>${i + 1}</td><td><b>${m.sym}</b></td>
+        <td style="text-align:left;color:var(--muted);font-size:10px">${SYM_SECTOR[m.sym] || ""}</td>
+        <td>${fmt(m.last)}</td><td style="color:var(--muted)">${S.lots[m.sym] ?? "–"}</td>
+        <td><b style="color:#4dd0e1">${m.rs ?? "–"}</b></td><td style="color:var(--muted)">${num(m.vol, 1)}</td>
+        <td style="color:#f5a623">${num(atrP(m))}%</td><td>${num(m.vars)}</td>
+        <td><b style="color:var(--accent)">${num(m.atvars, 1)}</b></td></tr>`, "var(--accent)")}
+    ${insightBlock("Top 10 AtMVaRS — MTF universe",
+      `AtVaRS × Zerodha MTF leverage. ${S.mtfLevExact ? "Using real Zerodha approved-securities data." : "⚠ leverage data not loaded."}`,
+      `<th>#</th><th style="text-align:left">Symbol</th><th style="text-align:left">Sector</th><th>LTP</th><th>Lev</th><th>RS</th><th>Vol%</th><th>ATR%</th><th>AtVaRS</th><th>AtMVaRS</th>`,
+      atm, (m, i) => `<tr><td>${i + 1}</td><td><b>${m.sym}</b></td>
+        <td style="text-align:left;color:var(--muted);font-size:10px">${SYM_SECTOR[m.sym] || ""}</td>
+        <td>${fmt(m.last)}</td><td><b style="color:#c39bd3">${(S.mtfLev[m.sym] || S.mtfLevDefault)}×</b></td>
+        <td><b style="color:#4dd0e1">${m.rs ?? "–"}</b></td><td style="color:var(--muted)">${num(m.vol, 1)}</td>
+        <td style="color:#f5a623">${num(atrP(m))}%</td><td>${num(m.atvars, 1)}</td>
+        <td><b style="color:#c39bd3">${num(m.atmvars, 1)}</b></td></tr>`, "#9b59b6")}
+  </div>`;
+}
+
+function renderInsightsOld() {
   const ms = Object.values(S.metrics);
   const el = document.getElementById("insights");
   if (!ms.length) { el.innerHTML = '<div id="msg"><span class="spin"></span>Loading…</div>'; return; }
