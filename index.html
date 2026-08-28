@@ -245,13 +245,26 @@ function volOf(cl, p = 63) {
   const sd = Math.sqrt(r.reduce((a, b) => a + (b - mu) ** 2, 0) / (r.length - 1));
   return sd * Math.sqrt(252) * 100;
 }
-// VaRS   = weighted RS ÷ path volatility   → rewards SMOOTH strength
-// AtVaRS = VaRS × ATR%                     → then rewards big daily range
-// AtMVaRS= AtVaRS × MTF leverage           → then rewards margin availability
+/* VaRS — volatility-PENALISED relative strength.
+   A plain rs/vol divides correctly for gains but inverts for losses: at rs=-20,
+   vol 60 scores -33 while vol 15 scores -133, i.e. the wildest loser ranks best.
+   So the penalty is applied sign-aware: volatility always pushes a score toward
+   (and past) zero — it shrinks gains and deepens losses.
+        rs >= 0 :  rs x (REF_VOL / vol)      high vol -> smaller gain
+        rs <  0 :  rs x (vol / REF_VOL)      high vol -> deeper loss
+   REF_VOL is a neutral reference so VaRS stays in familiar "%" units:
+   a stock at exactly REF_VOL volatility has VaRS == its raw RS. */
+const REF_VOL = 30;
+function varsOf(rs, vol) {
+  if (rs == null || !(vol > 0)) return null;
+  return rs >= 0 ? rs * (REF_VOL / vol) : rs * (vol / REF_VOL);
+}
+// AtVaRS = VaRS × ATR%            → then rewards big daily range
+// AtMVaRS= AtVaRS × MTF leverage  → then rewards margin availability
 function derivedScores(m, levFn) {
   const out = {};
   if (m.rsRaw != null && m.vol > 0) {
-    out.vars = m.rsRaw / m.vol * 100;
+    out.vars = varsOf(m.rsRaw, m.vol);
     const atrPct = m.atr20 && m.last ? m.atr20 / m.last * 100 : null;
     if (atrPct) {
       out.atvars = out.vars * atrPct;

@@ -179,9 +179,15 @@ export default async function handler(req, res) {
   }
   assignRS(metrics);
   // VaRS / AtVaRS / AtMVaRS  (see index.html for the definitions)
+  // Sign-aware volatility penalty: vol always pushes the score toward zero and
+  // beyond — it shrinks gains and deepens losses. (A plain rs/vol would rank the
+  // most volatile loser best, since -20/60 > -20/15.)
+  const REF_VOL = 30;
+  const varsOf = (rs, vol) => rs == null || !(vol > 0) ? null
+    : rs >= 0 ? rs * (REF_VOL / vol) : rs * (vol / REF_VOL);
   for (const m of Object.values(metrics)) {
     if (m.rsRaw == null || !(m.vol > 0)) continue;
-    m.vars = m.rsRaw / m.vol * 100;
+    m.vars = varsOf(m.rsRaw, m.vol);
     const atrPct = m.atr20 && m.last ? m.atr20 / m.last * 100 : null;
     if (atrPct) {
       m.atvars = m.vars * atrPct;
