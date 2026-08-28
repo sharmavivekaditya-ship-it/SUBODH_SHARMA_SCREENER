@@ -754,16 +754,18 @@ function sectorTable() {
     const mm = list.map(s => S.metrics[s]).filter(m => m && m.m1 != null);
     if (mm.length < 2) continue;
     const avg = f => { const v = mm.map(f).filter(x => x != null); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
-    rows.push({
+    const r = {
       sec, n: mm.length,
       m1: avg(m => m.m1), m3: avg(m => m.m3), m6: avg(m => m.m6),
       vars: avg(m => m.vars), rs: avg(m => m.rs)
-    });
+    };
+    r.score = rsRawOf(r);            // same 1M/3M/6M weighting as stock RS
+    rows.push(r);
   }
   return rows;
 }
-function topSectors(rows, key, n = 5) {
-  return [...rows].filter(r => r[key] != null).sort((a, b) => b[key] - a[key]).slice(0, n);
+function topSectors(rows, n = 5) {
+  return [...rows].filter(r => r.score != null).sort((a, b) => b.score - a.score).slice(0, n);
 }
 
 function insightBlock(title, sub, cols, items, fmtRow, accent) {
@@ -782,22 +784,41 @@ function renderInsights() {
   const N = v => v == null ? "–" : (v >= 0 ? "+" : "") + v.toFixed(1) + "%";
   const num = (v, d = 2) => v == null ? "–" : v.toFixed(d);
   const secRows = sectorTable();
-  const t1 = topSectors(secRows, "m1"), t3 = topSectors(secRows, "m3"), t6 = topSectors(secRows, "m6");
+  const top5 = topSectors(secRows);          // ONE list, ranked by weighted 1M/3M/6M
 
-  // ---- 1. strongest sectors across 1M / 3M / 6M -------------------------------
-  const secCard = (label, list, key) => `
-    <div class="ins-card"><h3>Top 5 Sectors — ${label}</h3>
-      <table class="rot"><thead><tr><th style="text-align:left">Sector</th><th>${label}</th><th>n</th><th>VaRS</th></tr></thead>
-      <tbody>${list.map((r, i) => `<tr>
-        <td><b style="color:${i === 0 ? "var(--green)" : "var(--text)"}">${i + 1}. ${r.sec}</b></td>
-        <td style="background:${heat(r[key])}">${N(r[key])}</td>
-        <td style="color:var(--muted)">${r.n}</td>
-        <td>${num(r.vars)}</td></tr>`).join("")}</tbody></table></div>`;
+  // ---- 1. the 5 strongest sectors overall -------------------------------------
+  const secTable = `
+    <div class="ins-card wide" style="border-color:var(--green)">
+      <h3 style="color:var(--green)">Top 5 Sectors — weighted ${RS_W.m1 * 100}% 1M + ${RS_W.m3 * 100}% 3M + ${RS_W.m6 * 100}% 6M</h3>
+      <table class="rot"><thead><tr><th>#</th><th style="text-align:left">Sector</th><th>Score</th><th>1M</th><th>3M</th><th>6M</th><th>VaRS</th><th>Avg RS</th><th>Members</th></tr></thead>
+      <tbody>${top5.map((r, i) => `<tr>
+        <td>${i + 1}</td><td style="text-align:left"><b style="color:${i === 0 ? "var(--green)" : "var(--text)"}">${r.sec}</b></td>
+        <td style="background:${heat(r.score)}"><b>${N(r.score)}</b></td>
+        <td style="background:${heat(r.m1)}">${N(r.m1)}</td>
+        <td style="background:${heat(r.m3)}">${N(r.m3)}</td>
+        <td style="background:${heat(r.m6)}">${N(r.m6)}</td>
+        <td>${num(r.vars)}</td><td><b style="color:#4dd0e1">${r.rs == null ? "–" : r.rs.toFixed(0)}</b></td>
+        <td style="color:var(--muted)">${r.n}</td></tr>`).join("")}</tbody></table>
+      <div style="font-size:10px;color:var(--muted);margin-top:6px">Ranked out of ${secRows.length} constructed sector indices.</div>
+    </div>`;
 
-  // ---- 2. leaders inside the strongest sectors, ranked by VaRS ----------------
-  const leadSecs = [...new Set(t1.map(r => r.sec))];
-  const leaders = ms.filter(m => leadSecs.includes(SYM_SECTOR[m.sym]) && m.vars != null)
-    .sort((a, b) => b.vars - a.vars).slice(0, 10);
+  // ---- 2. top 5 stocks driving each of those sectors, by VaRS -----------------
+  const driverCards = top5.map((r, si) => {
+    const mem = (SECTORS[r.sec] || []).map(s => S.metrics[s]).filter(m => m && m.vars != null)
+      .sort((a, b) => b.vars - a.vars).slice(0, 5);
+    return `<div class="ins-card">
+      <h3 style="color:var(--green)">${si + 1}. ${r.sec} <span style="color:var(--muted);font-weight:400">— top 5 drivers</span></h3>
+      <table class="rot"><thead><tr><th style="text-align:left">Symbol</th><th>LTP</th><th>1M</th><th>3M</th><th>6M</th><th>RS</th><th>ATR%</th><th>VaRS</th></tr></thead>
+      <tbody>${mem.length ? mem.map(m => `<tr>
+        <td style="text-align:left"><b>${m.sym}</b>${S.lots[m.sym] ? '<span class="tag vcp" style="margin-left:4px">F&amp;O</span>' : ""}</td>
+        <td>${fmt(m.last)}</td>
+        <td style="background:${heat(m.m1)}">${N(m.m1)}</td><td>${N(m.m3)}</td><td>${N(m.m6)}</td>
+        <td><b style="color:#4dd0e1">${m.rs ?? "–"}</b></td>
+        <td style="color:#f5a623">${num(m.atr20 && m.last ? m.atr20 / m.last * 100 : null)}%</td>
+        <td><b style="color:var(--green)">${num(m.vars)}</b></td></tr>`).join("")
+        : '<tr><td colspan="8" style="color:var(--muted)">No constituent data.</td></tr>'}</tbody></table>
+    </div>`;
+  }).join("");
 
   // ---- 3. AtVaRS in F&O, 4. AtMVaRS in MTF ------------------------------------
   const fnoSet = new Set(S.lists.fno), mtfSet = new Set(S.lists.mtf);
@@ -814,18 +835,8 @@ function renderInsights() {
         <b>AtVaRS</b> = VaRS × ATR% — then rewards daily range. <b>AtMVaRS</b> = AtVaRS × Zerodha MTF leverage.
       </div>
     </div>
-    ${secCard("1M", t1, "m1")}
-    ${secCard("3M", t3, "m3")}
-    ${secCard("6M", t6, "m6")}
-    ${insightBlock("Sector Leaders — top 10 by VaRS inside the 5 strongest 1M sectors",
-      `Ranked on volatility-adjusted relative strength. Sectors: ${leadSecs.join(" · ")}`,
-      `<th>#</th><th style="text-align:left">Symbol</th><th style="text-align:left">Sector</th><th>LTP</th><th>1M</th><th>3M</th><th>6M</th><th>RS</th><th>Vol%</th><th>VaRS</th>`,
-      leaders, (m, i) => `<tr><td>${i + 1}</td><td><b>${m.sym}</b></td>
-        <td style="text-align:left;color:var(--muted);font-size:10px">${SYM_SECTOR[m.sym] || ""}</td>
-        <td>${fmt(m.last)}</td><td style="background:${heat(m.m1)}">${N(m.m1)}</td>
-        <td>${N(m.m3)}</td><td>${N(m.m6)}</td>
-        <td><b style="color:#4dd0e1">${m.rs ?? "–"}</b></td><td style="color:var(--muted)">${num(m.vol, 1)}</td>
-        <td><b style="color:var(--green)">${num(m.vars)}</b></td></tr>`, "var(--green)")}
+    ${secTable}
+    ${driverCards}
     ${insightBlock("Top 10 AtVaRS — F&O universe",
       "VaRS × ATR%: smooth relative strength that also has the daily range to trade.",
       `<th>#</th><th style="text-align:left">Symbol</th><th style="text-align:left">Sector</th><th>LTP</th><th>Lot</th><th>RS</th><th>Vol%</th><th>ATR%</th><th>VaRS</th><th>AtVaRS</th>`,
