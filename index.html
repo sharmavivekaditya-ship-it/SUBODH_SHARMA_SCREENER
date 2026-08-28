@@ -824,20 +824,40 @@ function sectorTable() {
     const med = f => { const v = mm.map(f).filter(x => x != null).sort((a, b) => a - b);
       return v.length ? v[Math.floor(v.length / 2)] : null; };
     const r = {
-      sec, n: mm.length,
+      sec, n: mm.length, members: mm,
+      // the SECTOR's own growth = equal-weighted mean of its constituents' growth
       m1: avg(m => m.m1), m3: avg(m => m.m3), m6: avg(m => m.m6),
-      rs: avg(m => m.rs),
-      momo: med(m => m.momo),        // median: one runaway stock shouldn't carry a sector
+      avgMemberRS: avg(m => m.rs),
+      momo: med(m => m.momo),
       atrPct: avg(m => m.atrPct),
       leaders: mm.filter(m => m.rs >= 80).length
     };
-    r.score = r.rs;                  // sector strength = average member RS (bounded, robust)
+    // Sector growth = MEAN OF MEMBER COMPOSITES, not the composite of the mean
+    // returns. Those are equal only when every member has all three windows; a
+    // recently listed member renormalises its own weights and breaks linearity
+    // (measured ~0.9pt divergence). Taking the mean of composites guarantees the
+    // contribution identity below: sum(member growth / n) == sector growth.
+    r.growth = avg(m => rsRawOf(m));
     rows.push(r);
   }
+  // Percentile each sector against the OTHER SECTORS on its own growth -> 1-99.
+  const g = rows.filter(r => r.growth != null).sort((a, b) => a.growth - b.growth);
+  g.forEach((r, i) => { r.rs = g.length > 1 ? Math.round(i / (g.length - 1) * 98) + 1 : 50; });
+  rows.forEach(r => { r.score = r.growth; });
   return rows;
 }
 function topSectors(rows, n = 5) {
-  return [...rows].filter(r => r.score != null).sort((a, b) => b.score - a.score).slice(0, n);
+  return [...rows].filter(r => r.growth != null).sort((a, b) => b.growth - a.growth).slice(0, n);
+}
+/* Who is PULLING the sector: in an equal-weighted index each member contributes
+   (its own growth composite / n) percentage points to the sector's growth, and
+   those contributions sum exactly to the sector number. */
+function sectorPullers(r, minAtr, n = 5) {
+  return r.members
+    .map(m => ({ m, growth: rsRawOf(m), contrib: rsRawOf(m) / r.n }))
+    .filter(x => x.growth != null && (!minAtr || (x.m.atrPct || 0) >= minAtr))
+    .sort((a, b) => b.contrib - a.contrib)
+    .slice(0, n);
 }
 
 function insightBlock(title, sub, cols, items, fmtRow, accent) {
@@ -872,42 +892,49 @@ function renderInsights() {
   // ---- 1. the 5 strongest sectors overall -------------------------------------
   const secTable = `
     <div class="ins-card wide" style="border-color:var(--green)">
-      <h3 style="color:var(--green)">Top 5 Sectors — by average member RS</h3>
-      <table class="rot"><thead><tr><th>#</th><th style="text-align:left">Sector</th><th title="average RS of members">Avg RS</th><th title="members with RS >= 80">Leaders</th><th title="median Clenow momentum">Med Momo</th><th>1M</th><th>3M</th><th>6M</th><th>ATR%</th><th>Members</th></tr></thead>
+      <h3 style="color:var(--green)">Top 5 Sectors — percentiled on their own growth</h3>
+      <table class="rot"><thead><tr><th>#</th><th style="text-align:left">Sector</th><th title="percentile of this sector's growth vs all other sectors">Sector RS</th><th title="weighted 1M/3M/6M growth of the sector itself">Growth</th><th>1M</th><th>3M</th><th>6M</th><th title="members with stock RS >= 80">Leaders</th><th title="median Clenow momentum">Momo</th><th>ATR%</th><th>n</th></tr></thead>
       <tbody>${top5.map((r, i) => `<tr>
-        <td>${i + 1}</td><td style="text-align:left"><b style="color:${i === 0 ? "var(--green)" : "var(--text)"}">${r.sec}</b></td>
-        <td style="background:${hScore(r.score - 50)}"><b style="color:${rsColor(r.rs)}">${r.rs == null ? "–" : r.rs.toFixed(0)}</b></td>
-        <td><b>${r.leaders}</b><span style="color:var(--muted)">/${r.n}</span></td>
-        <td style="color:var(--accent)">${num(r.momo, 0)}</td>
+        <td>${i + 1}</td><td style="text-align:left"><b style="color:${i === 0 ? "var(--green)" : "var(--text)"}">${r.sec.replace(/^NIFTY /, "")}</b></td>
+        <td><b style="color:${rsColor(r.rs)}">${r.rs == null ? "–" : r.rs.toFixed(0)}</b></td>
+        <td style="background:${hScore(r.growth)}"><b>${N(r.growth)}</b></td>
         <td style="background:${hS1(r.m1)}">${N(r.m1)}</td>
         <td style="background:${hS3(r.m3)}">${N(r.m3)}</td>
         <td style="background:${hS6(r.m6)}">${N(r.m6)}</td>
+        <td><b>${r.leaders}</b><span style="color:var(--muted)">/${r.n}</span></td>
+        <td style="color:var(--accent)">${num(r.momo, 0)}</td>
         <td style="color:#f5a623">${num(r.atrPct)}%</td>
         <td style="color:var(--muted)">${r.n}</td></tr>`).join("")}</tbody></table>
       <div style="font-size:10px;color:var(--muted);margin-top:6px">
-        Ranked out of ${secRows.length} constructed sector indices. <b>Leaders</b> = members with RS ≥ 80 — a sector carried by
-        many strong names is more durable than one dragged up by a single outlier, which is also why Momo is shown as a median.
+        Each sector's own growth = equal-weighted mean of its constituents, blended ${RS_W.m1 * 100}% 1M + ${RS_W.m3 * 100}% 3M + ${RS_W.m6 * 100}% 6M,
+        then percentiled <b>against the other ${secRows.length} sectors</b> (Sector RS 99 = strongest sector, 50 = median sector).
+        <b>Leaders</b> = members whose own stock RS ≥ 80, so you can see whether the sector is broad or carried by a few names.
       </div>
     </div>`;
 
   // ---- 2. top 5 stocks driving each of those sectors, by VaRS -----------------
   const driverCards = top5.map((r, si) => {
-    const mem = (SECTORS[r.sec] || []).map(s => S.metrics[s])
-      .filter(m => m && m.momo != null && (!minAtr || (m.atrPct || 0) >= minAtr))
-      .sort((a, b) => b.momo - a.momo).slice(0, 5);
+    const pull = sectorPullers(r, minAtr, 5);
+    const share = pull.reduce((s, x) => s + x.contrib, 0);
     return `<div class="ins-card">
-      <h3 style="color:var(--green)">${si + 1}. ${r.sec} <span style="color:var(--muted);font-weight:400">— top 5 by Momo</span></h3>
-      <table class="rot"><thead><tr><th style="text-align:left">Symbol</th><th>LTP</th><th>1M</th><th>3M</th><th>6M</th><th>RS</th><th>ATR%</th><th title="Clenow: annualised 90d regression slope × R²">Momo</th></tr></thead>
-      <tbody>${mem.length ? mem.map(m => `<tr>
+      <h3 style="color:var(--green)">${si + 1}. ${r.sec.replace(/^NIFTY /, "")}
+        <span style="color:var(--muted);font-weight:400">— top 5 pullers</span></h3>
+      <div style="font-size:10px;color:var(--muted);margin:-6px 0 6px">
+        These 5 contribute <b style="color:var(--green)">${N(share)}</b> of the sector's <b>${N(r.growth)}</b>
+        (${r.growth ? (share / r.growth * 100).toFixed(0) : "–"}% of the move, from ${(5 / r.n * 100).toFixed(0)}% of the members)
+      </div>
+      <table class="rot"><thead><tr><th style="text-align:left">Symbol</th><th title="this stock's share of the sector's growth">Contrib</th><th>Growth</th><th>1M</th><th>3M</th><th>6M</th><th>RS</th><th>ATR%</th><th>Momo</th></tr></thead>
+      <tbody>${pull.length ? pull.map(({ m, growth, contrib }) => `<tr>
         <td style="text-align:left"><b>${m.sym}</b>${S.lots[m.sym] ? '<span class="tag vcp" style="margin-left:4px">F&amp;O</span>' : ""}</td>
-        <td>${fmt(m.last)}</td>
+        <td><b style="color:var(--green)">${N(contrib)}</b></td>
+        <td>${N(growth)}</td>
         <td style="background:${hK1(m.m1)}">${N(m.m1)}</td>
         <td style="background:${hK3(m.m3)}">${N(m.m3)}</td>
         <td style="background:${hK6(m.m6)}">${N(m.m6)}</td>
         <td>${rsCell(m.rs)}</td>
         <td style="color:#f5a623">${num(m.atrPct)}%</td>
-        <td><b style="color:var(--accent)">${num(m.momo, 0)}</b></td></tr>`).join("")
-        : '<tr><td colspan="8" style="color:var(--muted)">No constituent data.</td></tr>'}</tbody></table>
+        <td style="color:var(--accent)">${num(m.momo, 0)}</td></tr>`).join("")
+        : '<tr><td colspan="9" style="color:var(--muted)">No constituent data.</td></tr>'}</tbody></table>
     </div>`;
   }).join("");
 
@@ -933,10 +960,10 @@ function renderInsights() {
         ${SECTOR_SRC === "NSE"
           ? "Sector membership is NSE's own published index constituent list (niftyindices.com), refreshed daily — not a hand-built map. Sector performance is computed from those exact constituents."
           : "⚠ NSE index feed unavailable; using the bundled sector map."}<br>
-        <b style="color:var(--text)">Sectors</b> ranked by average member <b>RS</b> (1–99 percentile of weighted growth:
-        ${RS_W.m1 * 100}% 1M + ${RS_W.m3 * 100}% 3M + ${RS_W.m6 * 100}% 6M). <b style="color:var(--text)">Stocks</b> ranked by
-        <b style="color:var(--accent)">Momo</b> — Clenow's annualised 90-day exponential regression slope × R², which rewards trends that are
-        strong <i>and</i> smooth. Because R² multiplies the slope, a flat stock scores near zero however tidy its chart.<br>
+        <b style="color:var(--text)">Sectors</b> are ranked on their <i>own</i> growth (${RS_W.m1 * 100}% 1M + ${RS_W.m3 * 100}% 3M + ${RS_W.m6 * 100}% 6M),
+        percentiled against each other. <b style="color:var(--text)">Pullers</b> are the members contributing most to that growth —
+        in an equal-weighted index each member adds (its own growth ÷ member count) percentage points, and those contributions sum exactly to the sector figure.
+        <b style="color:var(--accent)">Momo</b> (Clenow slope × R²) and stock <b>RS</b> are shown as quality context, not as the pulling rank.<br>
         <b style="color:#f5a623">ATR%</b> and <b style="color:#c39bd3">leverage</b> are shown for tradability and position sizing — deliberately
         <i>not</i> baked into the ranking. Use the Min ATR% filter to exclude names too quiet to trade.
         Universe median volatility is ${REF_VOL.toFixed(0)}%.
