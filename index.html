@@ -719,7 +719,7 @@ function renderTable(liveSet) {
     return `<tr data-s="${r.sym}" class="${liveSet && liveSet.has(r.sym) ? "live" : ""}">
       <td style="color:var(--muted)">${r.rank}</td><td>${r.sym}</td>
       <td>${r.momo == null ? "–" : r.momo.toFixed(1)}</td>
-      <td><b style="color:#4dd0e1">${r.rs == null ? "–" : r.rs}</b></td>
+      <td>${rsCell(r.rs)}</td>
       <td>${fmt(r.last)}</td>
       <td>${r.atr20 && r.last ? (r.atr20 / r.last * 100).toFixed(2) + "%" : "–"}</td>
       <td>${sh ? `<b style="color:var(--accent)">${sh.toLocaleString("en-IN")}</b>` : "–"}</td><td>${st}</td>
@@ -742,11 +742,38 @@ function renderStrip() {
 
 /* ================= Insights view ================= */
 let SECTORS = {}, SYM_SECTOR = {};
-function heat(v) {
-  if (v == null) return "transparent";
-  const a = Math.min(Math.abs(v) / 12, 0.75) + 0.08;
-  return v >= 0 ? `rgba(38,166,154,${a})` : `rgba(239,83,80,${a})`;
+/* Heat colouring: intensity must reflect the actual grade of the number.
+   A fixed scale washes out — 6M returns span ±80% while 1M spans ±15%, so a
+   single threshold saturates one column and flattens the other. Each column
+   builds its own scale from its own data (90th percentile of |value|), with a
+   floor so a flat column doesn't get amplified into noise. */
+function makeHeat(values, floor = 4) {
+  const a = values.filter(v => v != null).map(Math.abs).sort((x, y) => x - y);
+  const p90 = a.length ? a[Math.min(a.length - 1, Math.floor(a.length * 0.9))] : floor;
+  const scale = Math.max(p90, floor);
+  return v => {
+    if (v == null) return "transparent";
+    const t = Math.min(Math.abs(v) / scale, 1);        // 0..1 within this column
+    const alpha = 0.06 + t * 0.74;                      // faint → strong
+    return v >= 0 ? `rgba(38,166,154,${alpha.toFixed(3)})` : `rgba(239,83,80,${alpha.toFixed(3)})`;
+  };
 }
+/* text turns white once the cell background is dark enough to hurt contrast */
+function heatText(v, scale) {
+  if (v == null) return "";
+  return Math.abs(v) / scale > 0.55 ? ";color:#fff;font-weight:600" : "";
+}
+// fallback fixed-scale heat (used where a column scale isn't meaningful)
+const heat = makeHeat([], 12);
+
+/* RS is already a 1-99 grade, so colour it directly on that scale:
+   red (weak) → amber (middling) → green (leader). */
+function rsColor(rs) {
+  if (rs == null) return "var(--muted)";
+  const t = Math.max(0, Math.min(1, (rs - 1) / 98));
+  return `hsl(${(t * 140).toFixed(0)}, ${(60 + t * 20).toFixed(0)}%, ${(52 + t * 8).toFixed(0)}%)`;
+}
+const rsCell = rs => `<b style="color:${rsColor(rs)}">${rs ?? "–"}</b>`;
 /* ---- constructed sector indices: equal-weighted composite of member returns ---- */
 function sectorTable() {
   const rows = [];
@@ -786,6 +813,16 @@ function renderInsights() {
   const secRows = sectorTable();
   const top5 = topSectors(secRows);          // ONE list, ranked by weighted 1M/3M/6M
 
+  // per-column heat scales, built from the full sector set (not just the top 5)
+  const hScore = makeHeat(secRows.map(r => r.score), 3);
+  const hS1 = makeHeat(secRows.map(r => r.m1), 3);
+  const hS3 = makeHeat(secRows.map(r => r.m3), 6);
+  const hS6 = makeHeat(secRows.map(r => r.m6), 10);
+  // stock-level scales, built from the whole universe
+  const hK1 = makeHeat(ms.map(m => m.m1), 5);
+  const hK3 = makeHeat(ms.map(m => m.m3), 10);
+  const hK6 = makeHeat(ms.map(m => m.m6), 15);
+
   // ---- 1. the 5 strongest sectors overall -------------------------------------
   const secTable = `
     <div class="ins-card wide" style="border-color:var(--green)">
@@ -793,11 +830,11 @@ function renderInsights() {
       <table class="rot"><thead><tr><th>#</th><th style="text-align:left">Sector</th><th>Score</th><th>1M</th><th>3M</th><th>6M</th><th>VaRS</th><th>Avg RS</th><th>Members</th></tr></thead>
       <tbody>${top5.map((r, i) => `<tr>
         <td>${i + 1}</td><td style="text-align:left"><b style="color:${i === 0 ? "var(--green)" : "var(--text)"}">${r.sec}</b></td>
-        <td style="background:${heat(r.score)}"><b>${N(r.score)}</b></td>
-        <td style="background:${heat(r.m1)}">${N(r.m1)}</td>
-        <td style="background:${heat(r.m3)}">${N(r.m3)}</td>
-        <td style="background:${heat(r.m6)}">${N(r.m6)}</td>
-        <td>${num(r.vars)}</td><td><b style="color:#4dd0e1">${r.rs == null ? "–" : r.rs.toFixed(0)}</b></td>
+        <td style="background:${hScore(r.score)}"><b>${N(r.score)}</b></td>
+        <td style="background:${hS1(r.m1)}">${N(r.m1)}</td>
+        <td style="background:${hS3(r.m3)}">${N(r.m3)}</td>
+        <td style="background:${hS6(r.m6)}">${N(r.m6)}</td>
+        <td>${num(r.vars)}</td><td><b style="color:${rsColor(r.rs)}">${r.rs == null ? "–" : r.rs.toFixed(0)}</b></td>
         <td style="color:var(--muted)">${r.n}</td></tr>`).join("")}</tbody></table>
       <div style="font-size:10px;color:var(--muted);margin-top:6px">Ranked out of ${secRows.length} constructed sector indices.</div>
     </div>`;
@@ -812,8 +849,10 @@ function renderInsights() {
       <tbody>${mem.length ? mem.map(m => `<tr>
         <td style="text-align:left"><b>${m.sym}</b>${S.lots[m.sym] ? '<span class="tag vcp" style="margin-left:4px">F&amp;O</span>' : ""}</td>
         <td>${fmt(m.last)}</td>
-        <td style="background:${heat(m.m1)}">${N(m.m1)}</td><td>${N(m.m3)}</td><td>${N(m.m6)}</td>
-        <td><b style="color:#4dd0e1">${m.rs ?? "–"}</b></td>
+        <td style="background:${hK1(m.m1)}">${N(m.m1)}</td>
+        <td style="background:${hK3(m.m3)}">${N(m.m3)}</td>
+        <td style="background:${hK6(m.m6)}">${N(m.m6)}</td>
+        <td>${rsCell(m.rs)}</td>
         <td style="color:#f5a623">${num(m.atr20 && m.last ? m.atr20 / m.last * 100 : null)}%</td>
         <td><b style="color:var(--green)">${num(m.vars)}</b></td></tr>`).join("")
         : '<tr><td colspan="8" style="color:var(--muted)">No constituent data.</td></tr>'}</tbody></table>
@@ -843,7 +882,7 @@ function renderInsights() {
       atv, (m, i) => `<tr><td>${i + 1}</td><td><b>${m.sym}</b></td>
         <td style="text-align:left;color:var(--muted);font-size:10px">${SYM_SECTOR[m.sym] || ""}</td>
         <td>${fmt(m.last)}</td><td style="color:var(--muted)">${S.lots[m.sym] ?? "–"}</td>
-        <td><b style="color:#4dd0e1">${m.rs ?? "–"}</b></td><td style="color:var(--muted)">${num(m.vol, 1)}</td>
+        <td>${rsCell(m.rs)}</td><td style="color:var(--muted)">${num(m.vol, 1)}</td>
         <td style="color:#f5a623">${num(atrP(m))}%</td><td>${num(m.vars)}</td>
         <td><b style="color:var(--accent)">${num(m.atvars, 1)}</b></td></tr>`, "var(--accent)")}
     ${insightBlock("Top 10 AtMVaRS — MTF universe",
@@ -852,7 +891,7 @@ function renderInsights() {
       atm, (m, i) => `<tr><td>${i + 1}</td><td><b>${m.sym}</b></td>
         <td style="text-align:left;color:var(--muted);font-size:10px">${SYM_SECTOR[m.sym] || ""}</td>
         <td>${fmt(m.last)}</td><td><b style="color:#c39bd3">${(S.mtfLev[m.sym] || S.mtfLevDefault)}×</b></td>
-        <td><b style="color:#4dd0e1">${m.rs ?? "–"}</b></td><td style="color:var(--muted)">${num(m.vol, 1)}</td>
+        <td>${rsCell(m.rs)}</td><td style="color:var(--muted)">${num(m.vol, 1)}</td>
         <td style="color:#f5a623">${num(atrP(m))}%</td><td>${num(m.atvars, 1)}</td>
         <td><b style="color:#c39bd3">${num(m.atmvars, 1)}</b></td></tr>`, "#9b59b6")}
   </div>`;
@@ -978,7 +1017,7 @@ function basketBlock(p) {
     <td style="text-align:right">₹${fmt(Math.round(m.notional))}</td>
     <td style="text-align:right">₹${fmt(Math.round(m.margin))}</td>
     <td style="text-align:right">${m.atrPct.toFixed(2)}%</td>
-    <td style="text-align:right"><b style="color:#4dd0e1">${m.rs == null ? "–" : m.rs}</b></td>
+    <td style="text-align:right">${rsCell(m.rs)}</td>
     <td style="text-align:right">${P2(m.momo)}</td></tr>` : `
     <tr><td>${i + 1}</td><td><b>${m.sym}</b></td><td style="text-align:right">${fmt(m.last)}</td>
     <td style="text-align:right"><b style="color:#c39bd3">${m.lv}×</b></td>
@@ -987,7 +1026,7 @@ function basketBlock(p) {
     <td style="text-align:right;color:var(--muted)">₹${fmt(Math.round(m.margin))}</td>
     <td style="text-align:right">${m.wt.toFixed(1)}%</td>
     <td style="text-align:right">${m.atrPct.toFixed(2)}%</td>
-    <td style="text-align:right"><b style="color:#4dd0e1">${m.rs == null ? "–" : m.rs}</b></td>
+    <td style="text-align:right">${rsCell(m.rs)}</td>
     <td style="text-align:right">${P2(m.momo)}</td></tr>`).join("");
   const rankRows = p.ranked.slice(0, 20).map(m => `
     <tr><td>${m.rank}</td><td><b>${m.sym}</b></td><td style="text-align:right">${P2(m.momo)}</td>
@@ -1003,14 +1042,14 @@ function basketBlock(p) {
       stat("Notional exposure", cr(p.notional), "var(--green)") + stat("Margin used", cr(p.margin)) +
       stat("Effective leverage", p.grossLev.toFixed(2) + "×", "var(--green)") + stat("Unused capacity", cr(p.cash)) +
       stat("Avg ATR%", p.avgAtrPct == null ? "–" : p.avgAtrPct.toFixed(2) + "%", "#f5a623") +
-      stat("Avg RS", p.avgRS == null ? "–" : p.avgRS.toFixed(0), "#4dd0e1") +
+      stat("Avg RS", p.avgRS == null ? "–" : p.avgRS.toFixed(0), rsColor(p.avgRS)) +
       (p.skipped ? stat("Skipped (lot &gt; risk unit)", p.skipped, "var(--red)") : "")
     : stat("Own capital", cr(p.av)) + stat("Max leverage in basket", p.maxLev + "×", "#c39bd3") +
       stat("Exposure deployed", cr(p.notional), "var(--green)") +
       stat("Effective leverage", p.grossLev.toFixed(2) + "×", "var(--green)") +
       stat("Own funds used", cr(p.margin)) + stat("Own funds free", cr(p.cash)) +
       stat("Avg ATR%", p.avgAtrPct == null ? "–" : p.avgAtrPct.toFixed(2) + "%", "#f5a623") +
-      stat("Avg RS", p.avgRS == null ? "–" : p.avgRS.toFixed(0), "#4dd0e1") +
+      stat("Avg RS", p.avgRS == null ? "–" : p.avgRS.toFixed(0), rsColor(p.avgRS)) +
       (S.mtfLevExact ? "" : `<span style="font-size:10px;color:var(--red)">⚠ using default ${S.mtfLevDefault}× — load your broker's MTF list for exact per-stock leverage</span>`);
   return `
   <div class="ins-card wide" style="border-color:${p.basket === "fno" ? "var(--accent)" : "#9b59b6"}">
