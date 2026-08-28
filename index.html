@@ -845,7 +845,7 @@ function renderInsights() {
       .sort((a, b) => b.vars - a.vars).slice(0, 5);
     return `<div class="ins-card">
       <h3 style="color:var(--green)">${si + 1}. ${r.sec} <span style="color:var(--muted);font-weight:400">— top 5 drivers</span></h3>
-      <table class="rot"><thead><tr><th style="text-align:left">Symbol</th><th>LTP</th><th>1M</th><th>3M</th><th>6M</th><th>RS</th><th>ATR%</th><th>VaRS</th></tr></thead>
+      <table class="rot"><thead><tr><th style="text-align:left">Symbol</th><th>LTP</th><th>1M</th><th>3M</th><th>6M</th><th>RS</th><th>ATR%</th><th title="Clenow: annualised 90d regression slope × R²">Momo</th><th>VaRS</th></tr></thead>
       <tbody>${mem.length ? mem.map(m => `<tr>
         <td style="text-align:left"><b>${m.sym}</b>${S.lots[m.sym] ? '<span class="tag vcp" style="margin-left:4px">F&amp;O</span>' : ""}</td>
         <td>${fmt(m.last)}</td>
@@ -854,8 +854,9 @@ function renderInsights() {
         <td style="background:${hK6(m.m6)}">${N(m.m6)}</td>
         <td>${rsCell(m.rs)}</td>
         <td style="color:#f5a623">${num(m.atr20 && m.last ? m.atr20 / m.last * 100 : null)}%</td>
+        <td style="color:var(--accent)">${num(m.momo, 0)}</td>
         <td><b style="color:var(--green)">${num(m.vars)}</b></td></tr>`).join("")
-        : '<tr><td colspan="8" style="color:var(--muted)">No constituent data.</td></tr>'}</tbody></table>
+        : '<tr><td colspan="9" style="color:var(--muted)">No constituent data.</td></tr>'}</tbody></table>
     </div>`;
   }).join("");
 
@@ -868,10 +869,13 @@ function renderInsights() {
   el.innerHTML = `<div class="ins-grid">
     <div class="ins-card wide" style="padding:10px 14px">
       <h3 style="margin:0">Market Insights — ${secRows.length} constructed sector indices · ${ms.length} stocks</h3>
-      <div style="font-size:10px;color:var(--muted);margin-top:4px">
-        Sector indices are equal-weighted composites of their constituents (NSE's own 400+ index feed isn't freely available).
-        <b>VaRS</b> = weighted RS (${RS_W.m1 * 100}% 1M + ${RS_W.m3 * 100}% 3M + ${RS_W.m6 * 100}% 6M) ÷ annualised return volatility — rewards <i>smooth</i> strength.
-        <b>AtVaRS</b> = VaRS × ATR% — then rewards daily range. <b>AtMVaRS</b> = AtVaRS × Zerodha MTF leverage.
+      <div style="font-size:10px;color:var(--muted);margin-top:4px;line-height:1.6">
+        Sector indices are equal-weighted composites of their constituents (NSE's own 400+ index feed isn't freely available).<br>
+        <b style="color:var(--text)">VaRS</b> = weighted RS (${RS_W.m1 * 100}% 1M + ${RS_W.m3 * 100}% 3M + ${RS_W.m6 * 100}% 6M) ÷ annualised return volatility.
+        <b style="color:var(--text)">AtVaRS</b> = VaRS × ATR%. <b style="color:var(--text)">AtMVaRS</b> = AtVaRS × Zerodha MTF leverage.<br>
+        <span style="color:#f5a623">Note:</span> these are <i>not</i> Clenow's measure. The two portfolios are ranked by
+        <b style="color:var(--accent)">Momo</b> = annualised 90-day exponential regression slope × R², exactly as in <i>Stocks on the Move</i> —
+        that rewards <i>smooth</i> trends. VaRS instead rewards <i>recent magnitude</i>. They will disagree, and the disagreement is informative.
       </div>
     </div>
     ${secTable}
