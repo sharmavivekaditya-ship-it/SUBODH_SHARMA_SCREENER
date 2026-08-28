@@ -179,23 +179,12 @@ export default async function handler(req, res) {
   }
   assignRS(metrics);
   // VaRS / AtVaRS / AtMVaRS  (see index.html for the definitions)
-  // VaRS = the RS rating (1-99) adjusted for volatility. RS is a percentile so it
-  // is always positive; a plain divide is therefore safe and monotonic.
-  // REF_VOL is a constant across stocks so it cannot affect ranking — it only
-  // sets the printed scale. Anchored to the universe's MEDIAN volatility so
-  // "VaRS > RS" means "calmer than the typical stock", self-recalibrating as
-  // the volatility regime shifts.
+  // VaRS/AtVaRS/AtMVaRS removed — see index.html for the empirical reasons.
+  // Ranking now uses Clenow `momo`; ATR% and leverage are columns, not scores.
   const vs = Object.values(metrics).map(m => m.vol).filter(x => x > 0).sort((a, b) => a - b);
   const REF_VOL = vs.length > 20 ? vs[Math.floor(vs.length / 2)] : 30;
-  const varsOf = (rs, vol) => rs == null || !(vol > 0) ? null : rs * (REF_VOL / vol);
   for (const m of Object.values(metrics)) {
-    if (m.rs == null || !(m.vol > 0)) continue;
-    m.vars = varsOf(m.rs, m.vol);
-    const atrPct = m.atr20 && m.last ? m.atr20 / m.last * 100 : null;
-    if (atrPct) {
-      m.atvars = m.vars * atrPct;
-      m.atmvars = m.atvars * mtfLev(m.sym);
-    }
+    m.atrPct = m.atr20 && m.last ? m.atr20 / m.last * 100 : null;
   }
 
   // Intraday series only for names the charts will actually show:

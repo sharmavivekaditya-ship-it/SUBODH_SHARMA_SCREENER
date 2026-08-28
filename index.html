@@ -253,34 +253,29 @@ function volOf(cl, p = 63) {
    REF_VOL is the neutral anchor: a stock at REF_VOL volatility keeps its RS
    unchanged, calmer stocks score above it, choppier ones below.
 
-   It is a constant applied to every stock, so it CANNOT change the ranking —
-   it only sets the scale of the printed number. Rather than pick an arbitrary
-   figure, it is anchored to the universe's own MEDIAN volatility, so
-   "VaRS > RS" reads as "calmer than the typical stock right now", and the
-   anchor re-calibrates itself as the market's volatility regime shifts. */
-let REF_VOL = 30;                    // fallback until the universe is measured
+   REMOVED — VaRS / AtVaRS / AtMVaRS. Tested against live data and dropped:
+     • AtVaRS correlated 0.935 with plain RS. Dividing by volatility then
+       multiplying by ATR% cancels out (vol vs ATR% correlate 0.634), so all the
+       machinery landed back on RS.
+     • The divide is structurally wrong for "find the strongest": a FLAT stock
+       wins by having a small denominator. SUNPHARMA (RS 49, vol 13%) outranked
+       LAURUSLABS (RS 98, vol 29%) in pharma.
+     • AtMVaRS multiplied by broker leverage, which spans only 3.00-3.77x and is
+       a position-SIZING input, not a measure of stock quality.
+
+   Clenow's `momo` (annualised 90d regression slope x R2) already does the job
+   correctly: R2 MULTIPLIES the slope, so a flat stock scores ~0 however smooth
+   it is, whereas dividing by volatility REWARDS flatness. Same intent, opposite
+   behaviour. momo correlates only 0.653 with RS, so it adds real information.
+   Ranked by momo, pharma reads LAURUSLABS 289 > DIVISLAB 100 > ... > SUNPHARMA 14.
+
+   ATR% and MTF leverage are kept as COLUMNS (tradability / sizing) and as an
+   optional ATR% floor — never multiplied into the quality score. */
+let REF_VOL = 30;                    // universe median volatility, reference only
 function setRefVol(metrics) {
   const v = Object.values(metrics).map(m => m.vol).filter(x => x > 0).sort((a, b) => a - b);
   if (v.length > 20) REF_VOL = v[Math.floor(v.length / 2)];
   return REF_VOL;
-}
-function varsOf(rs, vol) {
-  if (rs == null || !(vol > 0)) return null;
-  return rs * (REF_VOL / vol);
-}
-// AtVaRS = VaRS × ATR%            → then rewards big daily range
-// AtMVaRS= AtVaRS × MTF leverage  → then rewards margin availability
-function derivedScores(m, levFn) {
-  const out = {};
-  if (m.rs != null && m.vol > 0) {
-    out.vars = varsOf(m.rs, m.vol);            // m.rs is the 1-99 rating
-    const atrPct = m.atr20 && m.last ? m.atr20 / m.last * 100 : null;
-    if (atrPct) {
-      out.atvars = out.vars * atrPct;
-      if (levFn) out.atmvars = out.atvars * levFn(m.sym);
-    }
-  }
-  return out;
 }
 
 const S = {
@@ -448,9 +443,11 @@ async function loadMetrics(force) {
   }
   if (!Object.keys(m).length) throw new Error("metrics failed");
   assignRS(m);
-  setRefVol(m);                      // anchor VaRS to the universe's median vol
-  const lf = s => S.mtfLev[s] || S.mtfLevDefault;
-  for (const k of Object.keys(m)) Object.assign(m[k], derivedScores(m[k], lf));
+  setRefVol(m);
+  for (const k of Object.keys(m)) {
+    const x = m[k];
+    x.atrPct = x.atr20 && x.last ? x.atr20 / x.last * 100 : null;
+  }
   S.metrics = m; S.metricsTime = Date.now();
   try { localStorage.setItem("mp_metrics", JSON.stringify({ m, t: Date.now() })) } catch (_) {}
 }
@@ -805,12 +802,17 @@ function sectorTable() {
     const mm = list.map(s => S.metrics[s]).filter(m => m && m.m1 != null);
     if (mm.length < 2) continue;
     const avg = f => { const v = mm.map(f).filter(x => x != null); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
+    const med = f => { const v = mm.map(f).filter(x => x != null).sort((a, b) => a - b);
+      return v.length ? v[Math.floor(v.length / 2)] : null; };
     const r = {
       sec, n: mm.length,
       m1: avg(m => m.m1), m3: avg(m => m.m3), m6: avg(m => m.m6),
-      vars: avg(m => m.vars), rs: avg(m => m.rs)
+      rs: avg(m => m.rs),
+      momo: med(m => m.momo),        // median: one runaway stock shouldn't carry a sector
+      atrPct: avg(m => m.atrPct),
+      leaders: mm.filter(m => m.rs >= 80).length
     };
-    r.score = rsRawOf(r);            // same 1M/3M/6M weighting as stock RS
+    r.score = r.rs;                  // sector strength = average member RS (bounded, robust)
     rows.push(r);
   }
   return rows;
@@ -835,10 +837,11 @@ function renderInsights() {
   const N = v => v == null ? "–" : (v >= 0 ? "+" : "") + v.toFixed(1) + "%";
   const num = (v, d = 2) => v == null ? "–" : v.toFixed(d);
   const secRows = sectorTable();
-  const top5 = topSectors(secRows);          // ONE list, ranked by weighted 1M/3M/6M
+  const top5 = topSectors(secRows);          // ONE list, ranked by average member RS
+  const minAtr = S.minAtr || 0;              // optional tradability floor
 
   // per-column heat scales, built from the full sector set (not just the top 5)
-  const hScore = makeHeat(secRows.map(r => r.score), 3);
+  const hScore = makeHeat(secRows.map(r => r.score - 50), 10);
   const hS1 = makeHeat(secRows.map(r => r.m1), 3);
   const hS3 = makeHeat(secRows.map(r => r.m3), 6);
   const hS6 = makeHeat(secRows.map(r => r.m6), 10);
@@ -850,26 +853,32 @@ function renderInsights() {
   // ---- 1. the 5 strongest sectors overall -------------------------------------
   const secTable = `
     <div class="ins-card wide" style="border-color:var(--green)">
-      <h3 style="color:var(--green)">Top 5 Sectors — weighted ${RS_W.m1 * 100}% 1M + ${RS_W.m3 * 100}% 3M + ${RS_W.m6 * 100}% 6M</h3>
-      <table class="rot"><thead><tr><th>#</th><th style="text-align:left">Sector</th><th>Score</th><th>1M</th><th>3M</th><th>6M</th><th>VaRS</th><th>Avg RS</th><th>Members</th></tr></thead>
+      <h3 style="color:var(--green)">Top 5 Sectors — by average member RS</h3>
+      <table class="rot"><thead><tr><th>#</th><th style="text-align:left">Sector</th><th title="average RS of members">Avg RS</th><th title="members with RS >= 80">Leaders</th><th title="median Clenow momentum">Med Momo</th><th>1M</th><th>3M</th><th>6M</th><th>ATR%</th><th>Members</th></tr></thead>
       <tbody>${top5.map((r, i) => `<tr>
         <td>${i + 1}</td><td style="text-align:left"><b style="color:${i === 0 ? "var(--green)" : "var(--text)"}">${r.sec}</b></td>
-        <td style="background:${hScore(r.score)}"><b>${N(r.score)}</b></td>
+        <td style="background:${hScore(r.score - 50)}"><b style="color:${rsColor(r.rs)}">${r.rs == null ? "–" : r.rs.toFixed(0)}</b></td>
+        <td><b>${r.leaders}</b><span style="color:var(--muted)">/${r.n}</span></td>
+        <td style="color:var(--accent)">${num(r.momo, 0)}</td>
         <td style="background:${hS1(r.m1)}">${N(r.m1)}</td>
         <td style="background:${hS3(r.m3)}">${N(r.m3)}</td>
         <td style="background:${hS6(r.m6)}">${N(r.m6)}</td>
-        <td>${num(r.vars)}</td><td><b style="color:${rsColor(r.rs)}">${r.rs == null ? "–" : r.rs.toFixed(0)}</b></td>
+        <td style="color:#f5a623">${num(r.atrPct)}%</td>
         <td style="color:var(--muted)">${r.n}</td></tr>`).join("")}</tbody></table>
-      <div style="font-size:10px;color:var(--muted);margin-top:6px">Ranked out of ${secRows.length} constructed sector indices.</div>
+      <div style="font-size:10px;color:var(--muted);margin-top:6px">
+        Ranked out of ${secRows.length} constructed sector indices. <b>Leaders</b> = members with RS ≥ 80 — a sector carried by
+        many strong names is more durable than one dragged up by a single outlier, which is also why Momo is shown as a median.
+      </div>
     </div>`;
 
   // ---- 2. top 5 stocks driving each of those sectors, by VaRS -----------------
   const driverCards = top5.map((r, si) => {
-    const mem = (SECTORS[r.sec] || []).map(s => S.metrics[s]).filter(m => m && m.vars != null)
-      .sort((a, b) => b.vars - a.vars).slice(0, 5);
+    const mem = (SECTORS[r.sec] || []).map(s => S.metrics[s])
+      .filter(m => m && m.momo != null && (!minAtr || (m.atrPct || 0) >= minAtr))
+      .sort((a, b) => b.momo - a.momo).slice(0, 5);
     return `<div class="ins-card">
-      <h3 style="color:var(--green)">${si + 1}. ${r.sec} <span style="color:var(--muted);font-weight:400">— top 5 drivers</span></h3>
-      <table class="rot"><thead><tr><th style="text-align:left">Symbol</th><th>LTP</th><th>1M</th><th>3M</th><th>6M</th><th>RS</th><th>ATR%</th><th title="Clenow: annualised 90d regression slope × R²">Momo</th><th>VaRS</th></tr></thead>
+      <h3 style="color:var(--green)">${si + 1}. ${r.sec} <span style="color:var(--muted);font-weight:400">— top 5 by Momo</span></h3>
+      <table class="rot"><thead><tr><th style="text-align:left">Symbol</th><th>LTP</th><th>1M</th><th>3M</th><th>6M</th><th>RS</th><th>ATR%</th><th title="Clenow: annualised 90d regression slope × R²">Momo</th></tr></thead>
       <tbody>${mem.length ? mem.map(m => `<tr>
         <td style="text-align:left"><b>${m.sym}</b>${S.lots[m.sym] ? '<span class="tag vcp" style="margin-left:4px">F&amp;O</span>' : ""}</td>
         <td>${fmt(m.last)}</td>
@@ -877,54 +886,63 @@ function renderInsights() {
         <td style="background:${hK3(m.m3)}">${N(m.m3)}</td>
         <td style="background:${hK6(m.m6)}">${N(m.m6)}</td>
         <td>${rsCell(m.rs)}</td>
-        <td style="color:#f5a623">${num(m.atr20 && m.last ? m.atr20 / m.last * 100 : null)}%</td>
-        <td style="color:var(--accent)">${num(m.momo, 0)}</td>
-        <td><b style="color:var(--green)">${num(m.vars)}</b></td></tr>`).join("")
-        : '<tr><td colspan="9" style="color:var(--muted)">No constituent data.</td></tr>'}</tbody></table>
+        <td style="color:#f5a623">${num(m.atrPct)}%</td>
+        <td><b style="color:var(--accent)">${num(m.momo, 0)}</b></td></tr>`).join("")
+        : '<tr><td colspan="8" style="color:var(--muted)">No constituent data.</td></tr>'}</tbody></table>
     </div>`;
   }).join("");
 
   // ---- 3. AtVaRS in F&O, 4. AtMVaRS in MTF ------------------------------------
   const fnoSet = new Set(S.lists.fno), mtfSet = new Set(S.lists.mtf);
-  const atv = ms.filter(m => fnoSet.has(m.sym) && m.atvars != null).sort((a, b) => b.atvars - a.atvars).slice(0, 10);
-  const atm = ms.filter(m => mtfSet.has(m.sym) && m.atmvars != null).sort((a, b) => b.atmvars - a.atmvars).slice(0, 10);
-  const atrP = m => m.atr20 && m.last ? m.atr20 / m.last * 100 : null;
+  const pick = set => ms.filter(m => set.has(m.sym) && m.momo != null && (!minAtr || (m.atrPct || 0) >= minAtr))
+    .sort((a, b) => b.momo - a.momo).slice(0, 10);
+  const atv = pick(fnoSet), atm = pick(mtfSet);
 
   el.innerHTML = `<div class="ins-grid">
     <div class="ins-card wide" style="padding:10px 14px">
-      <h3 style="margin:0">Market Insights — ${secRows.length} constructed sector indices · ${ms.length} stocks</h3>
-      <div style="font-size:10px;color:var(--muted);margin-top:4px;line-height:1.6">
-        Sector indices are equal-weighted composites of their constituents (NSE's own 400+ index feed isn't freely available).<br>
-        <b style="color:var(--text)">RS</b> = 1–99 percentile of weighted growth (${RS_W.m1 * 100}% 1M + ${RS_W.m3 * 100}% 3M + ${RS_W.m6 * 100}% 6M) across the universe.
-        <b style="color:var(--text)">VaRS</b> = RS × (${REF_VOL.toFixed(0)} ÷ annualised volatility) — same rating, penalised for a choppy path.
-        The ${REF_VOL.toFixed(0)} is the universe's <i>median</i> volatility, so VaRS above RS = calmer than the typical stock. It scales the number, not the ranking.
-        <b style="color:var(--text)">AtVaRS</b> = VaRS × ATR%. <b style="color:var(--text)">AtMVaRS</b> = AtVaRS × Zerodha MTF leverage.<br>
-        <span style="color:#f5a623">Note:</span> these are <i>not</i> Clenow's measure. The two portfolios are ranked by
-        <b style="color:var(--accent)">Momo</b> = annualised 90-day exponential regression slope × R², exactly as in <i>Stocks on the Move</i> —
-        that rewards <i>smooth</i> trends. VaRS instead rewards <i>recent magnitude</i>. They will disagree, and the disagreement is informative.
+      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+        <h3 style="margin:0">Best Sectors → Best Stocks — ${secRows.length} sector indices · ${ms.length} stocks</h3>
+        <label class="ctl" style="margin-left:auto">Min ATR%
+          <select id="minAtrSel">
+            ${[0, 1.5, 2, 2.5, 3, 4].map(v => `<option value="${v}"${minAtr === v ? " selected" : ""}>${v ? v + "%" : "off"}</option>`).join("")}
+          </select>
+        </label>
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.6">
+        <b style="color:var(--text)">Sectors</b> ranked by average member <b>RS</b> (1–99 percentile of weighted growth:
+        ${RS_W.m1 * 100}% 1M + ${RS_W.m3 * 100}% 3M + ${RS_W.m6 * 100}% 6M). <b style="color:var(--text)">Stocks</b> ranked by
+        <b style="color:var(--accent)">Momo</b> — Clenow's annualised 90-day exponential regression slope × R², which rewards trends that are
+        strong <i>and</i> smooth. Because R² multiplies the slope, a flat stock scores near zero however tidy its chart.<br>
+        <b style="color:#f5a623">ATR%</b> and <b style="color:#c39bd3">leverage</b> are shown for tradability and position sizing — deliberately
+        <i>not</i> baked into the ranking. Use the Min ATR% filter to exclude names too quiet to trade.
+        Universe median volatility is ${REF_VOL.toFixed(0)}%.
       </div>
     </div>
     ${secTable}
     ${driverCards}
-    ${insightBlock("Top 10 AtVaRS — F&O universe",
-      "VaRS × ATR%: smooth relative strength that also has the daily range to trade.",
-      `<th>#</th><th style="text-align:left">Symbol</th><th style="text-align:left">Sector</th><th>LTP</th><th>Lot</th><th>RS</th><th>Vol%</th><th>ATR%</th><th>VaRS</th><th>AtVaRS</th>`,
+    ${insightBlock("Top 10 — F&O universe, by Momo",
+      `Strongest smooth trends among derivatives-eligible names. Lot size shown for sizing.${minAtr ? ` Filtered to ATR% ≥ ${minAtr}.` : ""}`,
+      `<th>#</th><th style="text-align:left">Symbol</th><th style="text-align:left">Sector</th><th>LTP</th><th>Lot</th><th>1M</th><th>3M</th><th>RS</th><th>ATR%</th><th>Momo</th>`,
       atv, (m, i) => `<tr><td>${i + 1}</td><td><b>${m.sym}</b></td>
         <td style="text-align:left;color:var(--muted);font-size:10px">${SYM_SECTOR[m.sym] || ""}</td>
         <td>${fmt(m.last)}</td><td style="color:var(--muted)">${S.lots[m.sym] ?? "–"}</td>
-        <td>${rsCell(m.rs)}</td><td style="color:var(--muted)">${num(m.vol, 1)}</td>
-        <td style="color:#f5a623">${num(atrP(m))}%</td><td>${num(m.vars)}</td>
-        <td><b style="color:var(--accent)">${num(m.atvars, 1)}</b></td></tr>`, "var(--accent)")}
-    ${insightBlock("Top 10 AtMVaRS — MTF universe",
-      `AtVaRS × Zerodha MTF leverage. ${S.mtfLevExact ? "Using real Zerodha approved-securities data." : "⚠ leverage data not loaded."}`,
-      `<th>#</th><th style="text-align:left">Symbol</th><th style="text-align:left">Sector</th><th>LTP</th><th>Lev</th><th>RS</th><th>Vol%</th><th>ATR%</th><th>AtVaRS</th><th>AtMVaRS</th>`,
+        <td style="background:${hK1(m.m1)}">${N(m.m1)}</td><td style="background:${hK3(m.m3)}">${N(m.m3)}</td>
+        <td>${rsCell(m.rs)}</td>
+        <td style="color:#f5a623">${num(m.atrPct)}%</td>
+        <td><b style="color:var(--accent)">${num(m.momo, 0)}</b></td></tr>`, "var(--accent)")}
+    ${insightBlock("Top 10 — MTF universe, by Momo",
+      `Strongest smooth trends among MTF-eligible cash stocks. ${S.mtfLevExact ? "Leverage is real Zerodha data, shown for position sizing — it does not affect this ranking." : "⚠ leverage data not loaded."}${minAtr ? ` Filtered to ATR% ≥ ${minAtr}.` : ""}`,
+      `<th>#</th><th style="text-align:left">Symbol</th><th style="text-align:left">Sector</th><th>LTP</th><th>Lev</th><th>1M</th><th>3M</th><th>RS</th><th>ATR%</th><th>Momo</th>`,
       atm, (m, i) => `<tr><td>${i + 1}</td><td><b>${m.sym}</b></td>
         <td style="text-align:left;color:var(--muted);font-size:10px">${SYM_SECTOR[m.sym] || ""}</td>
         <td>${fmt(m.last)}</td><td><b style="color:#c39bd3">${(S.mtfLev[m.sym] || S.mtfLevDefault)}×</b></td>
-        <td>${rsCell(m.rs)}</td><td style="color:var(--muted)">${num(m.vol, 1)}</td>
-        <td style="color:#f5a623">${num(atrP(m))}%</td><td>${num(m.atvars, 1)}</td>
-        <td><b style="color:#c39bd3">${num(m.atmvars, 1)}</b></td></tr>`, "#9b59b6")}
+        <td style="background:${hK1(m.m1)}">${N(m.m1)}</td><td style="background:${hK3(m.m3)}">${N(m.m3)}</td>
+        <td>${rsCell(m.rs)}</td>
+        <td style="color:#f5a623">${num(m.atrPct)}%</td>
+        <td><b style="color:#c39bd3">${num(m.momo, 0)}</b></td></tr>`, "#9b59b6")}
   </div>`;
+  const sel = document.getElementById("minAtrSel");
+  if (sel) sel.onchange = e => { S.minAtr = parseFloat(e.target.value) || 0; renderInsights(); };
 }
 
 function renderInsightsOld() {
