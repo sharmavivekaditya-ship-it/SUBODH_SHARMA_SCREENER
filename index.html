@@ -212,10 +212,20 @@ async function loadUniverse() {
       S.minMtfLev = j.minMtfLev || 3;
       S.mtfLevDefault = j.mtfLevDefault || 4;
       S.mtfLevExact = (j.mtfLevCustom || 0) > 0;
-      if (j.sectors) {
-        SECTORS = j.sectors;
-        SYM_SECTOR = {};
-        for (const [sec, list] of Object.entries(SECTORS)) for (const s of list) SYM_SECTOR[s] = sec;
+      if (j.sectors) setSectors(j.sectors, "bundled");
+    }
+  } catch (_) {}
+  // Official NSE sectoral indices — authoritative membership, overrides the bundle
+  try {
+    const r = await fetch("/api/nse-sectors", { cache: "no-store" });
+    if (r.ok) {
+      const j = await r.json();
+      if (j.sectors && Object.keys(j.sectors).length >= 10) {
+        setSectors(j.sectors, j.source === "nse" ? "NSE" : "bundled");
+        // every index constituent must be priced, or sectors are computed on partial data
+        if (Array.isArray(j.universe) && j.universe.length) {
+          UNIVERSE = [...new Set([...UNIVERSE, ...j.universe])];
+        }
       }
     }
   } catch (_) {}
@@ -552,6 +562,7 @@ async function loadSnapshot() {
     S.snapIntraday = j.intraday || null; S.snapTime = j.ts;
     if (j.index) S.indexInfo = j.index;
     if (j.refVol > 0) REF_VOL = j.refVol; else setRefVol(j.metrics);
+    if (j.sectors && Object.keys(j.sectors).length >= 10) setSectors(j.sectors, j.sectorSrc || "NSE");
     try { localStorage.setItem("mp_metrics", JSON.stringify({ m: j.metrics, t: j.ts })) } catch (_) {}
     return true;
   } catch (_) { return false; }
@@ -762,7 +773,15 @@ function renderStrip() {
 }
 
 /* ================= Insights view ================= */
-let SECTORS = {}, SYM_SECTOR = {};
+let SECTORS = {}, SYM_SECTOR = {}, SECTOR_SRC = "bundled";
+function setSectors(map, src) {
+  SECTORS = map; SECTOR_SRC = src; SYM_SECTOR = {};
+  // a stock can sit in several NSE indices; keep the most specific (smallest) one
+  const size = s => (SECTORS[s] || []).length;
+  for (const [sec, list] of Object.entries(SECTORS))
+    for (const s of list)
+      if (!SYM_SECTOR[s] || size(sec) < size(SYM_SECTOR[s])) SYM_SECTOR[s] = sec;
+}
 /* Heat colouring: intensity must reflect the actual grade of the number.
    A fixed scale washes out — 6M returns span ±80% while 1M spans ±15%, so a
    single threshold saturates one column and flattens the other. Each column
@@ -901,7 +920,9 @@ function renderInsights() {
   el.innerHTML = `<div class="ins-grid">
     <div class="ins-card wide" style="padding:10px 14px">
       <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
-        <h3 style="margin:0">Best Sectors → Best Stocks — ${secRows.length} sector indices · ${ms.length} stocks</h3>
+        <h3 style="margin:0">Best Sectors → Best Stocks —
+          ${secRows.length} ${SECTOR_SRC === "NSE" ? '<span style="color:var(--green)">official NSE sectoral indices</span>' : "sector groups (bundled fallback)"}
+          · ${ms.length} stocks</h3>
         <label class="ctl" style="margin-left:auto">Min ATR%
           <select id="minAtrSel">
             ${[0, 1.5, 2, 2.5, 3, 4].map(v => `<option value="${v}"${minAtr === v ? " selected" : ""}>${v ? v + "%" : "off"}</option>`).join("")}
@@ -909,6 +930,9 @@ function renderInsights() {
         </label>
       </div>
       <div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.6">
+        ${SECTOR_SRC === "NSE"
+          ? "Sector membership is NSE's own published index constituent list (niftyindices.com), refreshed daily — not a hand-built map. Sector performance is computed from those exact constituents."
+          : "⚠ NSE index feed unavailable; using the bundled sector map."}<br>
         <b style="color:var(--text)">Sectors</b> ranked by average member <b>RS</b> (1–99 percentile of weighted growth:
         ${RS_W.m1 * 100}% 1M + ${RS_W.m3 * 100}% 3M + ${RS_W.m6 * 100}% 6M). <b style="color:var(--text)">Stocks</b> ranked by
         <b style="color:var(--accent)">Momo</b> — Clenow's annualised 90-day exponential regression slope × R², which rewards trends that are

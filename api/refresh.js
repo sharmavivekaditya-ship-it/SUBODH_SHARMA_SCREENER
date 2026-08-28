@@ -2,7 +2,8 @@
 // series) and stores it in Upstash Redis (free KV). Ping this every minute during
 // market hours from cron-job.org — the app then loads instantly from /api/snapshot,
 // even for the first visitor of the day.
-import { UNIVERSE, FNO, MTF3, mtfLev } from "./_universe.js";
+import { UNIVERSE as BASE_UNIVERSE, FNO, MTF3, mtfLev } from "./_universe.js";
+import { fetchAllSectors } from "./_nse_indices.js";
 const H = { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", "Accept": "application/json" };
 
 async function yChart(s, range, interval) {
@@ -140,6 +141,12 @@ export default async function handler(req, res) {
     return out;
   }
 
+  // Universe = our F&O/MTF baskets PLUS every constituent of the official NSE
+  // sectoral indices, so sector stats are never computed on partial membership.
+  let sectors = {};
+  try { sectors = await fetchAllSectors(); } catch (_) {}
+  const UNIVERSE = [...new Set([...BASE_UNIVERSE, ...Object.values(sectors).flat()])];
+
   const daily = {}, intraday = {};
   let index = null;
   const [, idxData] = await Promise.all([
@@ -203,7 +210,11 @@ export default async function handler(req, res) {
     if (i) intraday[s] = trim(i);
   });
 
-  const snap = { ts: Date.now(), metrics, intraday, index, refVol: REF_VOL };
+  const snap = {
+    ts: Date.now(), metrics, intraday, index, refVol: REF_VOL,
+    sectors: Object.keys(sectors).length >= 10 ? sectors : null,
+    sectorSrc: Object.keys(sectors).length >= 10 ? "NSE" : "bundled"
+  };
   const url = process.env.UPSTASH_REDIS_REST_URL, tok = process.env.UPSTASH_REDIS_REST_TOKEN;
   let stored = false;
   if (url && tok) {
