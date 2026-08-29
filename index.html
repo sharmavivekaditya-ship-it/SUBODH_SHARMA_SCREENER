@@ -292,6 +292,7 @@ const S = {
   count: 6, range: "5d", interval: "5m", clip: true, refreshSec: 60, timer: null,
   basket: "fno", lists: { fno: [], mtf: [] }, acct: { fno: 1000000, mtf: 1000000 },
   lots: {}, marginPct: 20,
+  nseIdx: null, nseBusy: false, nseErr: null, selIdx: null, selSyms: null, selErr: null,
   mtfLev: {}, minMtfLev: 3, mtfLevDefault: 4, mtfLevExact: false,
   metrics: {}, metricsTime: 0, charts: {}, rows: [],
   showVol: true, showS20: false, showS50: false,
@@ -814,6 +815,58 @@ function rsColor(rs) {
   return `hsl(${(t * 140).toFixed(0)}, ${(60 + t * 20).toFixed(0)}%, ${(52 + t * 8).toFixed(0)}%)`;
 }
 const rsCell = rs => `<b style="color:${rsColor(rs)}">${rs ?? "–"}</b>`;
+/* ================= Official NSE index screen =================
+   1-5 top 25 by 6M/3M/1M/1W/1D  ->  6 keep those in >=3 lists
+   7 rank by RS  ->  8 click through to constituents ranked by stock RS      */
+async function loadNseIndices(force) {
+  if (S.nseIdx && !force) return;
+  if (S.nseBusy) return;
+  S.nseBusy = true;
+  try {
+    const r = await fetch("/api/nse-indices", { cache: "no-store" });
+    if (r.ok) { const j = await r.json(); if (j.list) S.nseIdx = j; }
+    else S.nseErr = "HTTP " + r.status;
+  } catch (e) { S.nseErr = String(e); }
+  S.nseBusy = false;
+  if (S.view === "insights") renderInsights();
+}
+
+async function openIndex(name) {
+  S.selIdx = name; S.selSyms = null; S.selErr = null;
+  renderInsights();
+  try {
+    const r = await fetch(`/api/index-constituents?index=${encodeURIComponent(name)}`, { cache: "no-store" });
+    if (!r.ok) { S.selErr = "Constituent list not published for this index."; renderInsights(); return; }
+    const j = await r.json();
+    S.selSyms = j.symbols || [];
+    // price anything we don't already have, so RS is available for every member
+    const missing = S.selSyms.filter(s => !S.metrics[s]);
+    if (missing.length) {
+      const d = await apiMarket(missing, "1y", "1d");
+      const add = {};
+      for (const [sym, x] of Object.entries(d)) {
+        const cl = [], hh = [], ll = [], vv = [], oo = [];
+        for (let i = 0; i < x.c.length; i++) if (x.c[i] != null) {
+          cl.push(x.c[i]); hh.push(x.h[i] ?? x.c[i]); ll.push(x.l[i] ?? x.c[i]); vv.push(x.v[i] || 0); oo.push(x.o[i] ?? x.c[i]);
+        }
+        if (cl.length < 30) continue;
+        const last = x.meta.last ?? cl[cl.length - 1], prev = cl[cl.length - 2];
+        add[sym] = {
+          sym, last, name: x.meta.name,
+          d1: prev ? (last - prev) / prev * 100 : null,
+          w1: pctBack(cl, 5), m1: pctBack(cl, 21), m3: pctBack(cl, 63), m6: pctBack(cl, 126), y1: pctBack(cl, 251),
+          rsi: rsi14(cl), vol: volOf(cl), ...momoExtras(cl, hh, ll, oo)
+        };
+        add[sym].rsRaw = rsRawOf(add[sym]);
+        add[sym].atrPct = add[sym].atr20 && last ? add[sym].atr20 / last * 100 : null;
+      }
+      Object.assign(S.metrics, add);
+      assignRS(S.metrics);              // re-percentile with the new names included
+    }
+  } catch (e) { S.selErr = String(e); }
+  renderInsights();
+}
+
 /* ---- constructed sector indices: equal-weighted composite of member returns ---- */
 function sectorTable() {
   const rows = [];
@@ -875,9 +928,78 @@ function renderInsights() {
   if (!ms.length) { el.innerHTML = '<div id="msg"><span class="spin"></span>Loading…</div>'; return; }
   const N = v => v == null ? "–" : (v >= 0 ? "+" : "") + v.toFixed(1) + "%";
   const num = (v, d = 2) => v == null ? "–" : v.toFixed(d);
-  const secRows = sectorTable();
-  const top5 = topSectors(secRows);          // ONE list, ranked by average member RS
   const minAtr = S.minAtr || 0;              // optional tradability floor
+  if (!S.nseIdx && !S.nseErr) loadNseIndices();
+
+  // ---- Official NSE index screen -------------------------------------------
+  const NI = S.nseIdx;
+  const nseCard = (() => {
+    if (S.nseErr && !NI) return `<div class="ins-card wide" style="border-color:var(--red)">
+      <h3 style="color:var(--red)">NSE index data unavailable</h3>
+      <div style="font-size:11px;color:var(--muted)">${S.nseErr}. Falling back to constituent-built sectors below.</div></div>`;
+    if (!NI) return `<div class="ins-card wide"><h3>Official NSE indices</h3>
+      <div style="font-size:11px;color:var(--muted)"><span class="spin"></span>Loading official index closes…</div></div>`;
+    const L = NI.list;
+    const hLbl = { d1: "1D", w1: "1W", m1: "1M", m3: "3M", m6: "6M" };
+    const hc = k => makeHeat(L.map(r => r[k]), k === "d1" ? 1.5 : k === "w1" ? 3 : k === "m1" ? 6 : k === "m3" ? 10 : 15);
+    const H1 = hc("d1"), H2 = hc("w1"), H3 = hc("m1"), H4 = hc("m3"), H5 = hc("m6");
+    return `<div class="ins-card wide" style="border-color:var(--green)">
+      <h3 style="color:var(--green)">Strongest NSE Indices — in the top ${NI.topN} of at least ${NI.minHits} of 5 timeframes</h3>
+      <div style="font-size:10px;color:var(--muted);margin:-6px 0 8px">
+        Official NSE closes (${NI.totalIndices} equity indices, as of ${NI.asOf}). Each timeframe gets its own top-${NI.topN} list;
+        only indices appearing in ≥${NI.minHits} of the five survive, then they are ranked by RS.
+        <b style="color:var(--text)">Click any row</b> to see its constituents ranked by stock RS.
+      </div>
+      <table class="rot"><thead><tr><th>#</th><th style="text-align:left">Index</th><th>RS</th><th>In</th>
+        <th>1D</th><th>1W</th><th>1M</th><th>3M</th><th>6M</th></tr></thead>
+      <tbody>${L.length ? L.map((r, i) => `<tr data-idx="${encodeURIComponent(r.index)}" style="cursor:pointer${S.selIdx === r.index ? ";background:var(--hl)" : ""}">
+        <td>${i + 1}</td>
+        <td style="text-align:left"><b style="color:${S.selIdx === r.index ? "var(--accent)" : "var(--text)"}">${r.index}</b></td>
+        <td>${rsCell(r.rs)}</td>
+        <td><b>${r.hitCount}</b><span style="color:var(--muted)">/5</span></td>
+        <td style="background:${H1(r.d1)}">${N(r.d1)}</td>
+        <td style="background:${H2(r.w1)}">${N(r.w1)}</td>
+        <td style="background:${H3(r.m1)}">${N(r.m1)}</td>
+        <td style="background:${H4(r.m3)}">${N(r.m3)}</td>
+        <td style="background:${H5(r.m6)}">${N(r.m6)}</td></tr>`).join("")
+        : '<tr><td colspan="9" style="color:var(--muted)">No index is strong across ≥3 timeframes right now.</td></tr>'}</tbody></table>
+    </div>`;
+  })();
+
+  // ---- constituents of the clicked index, ranked by stock RS ---------------
+  const constCard = (() => {
+    if (!S.selIdx) return "";
+    const head = `<h3 style="color:var(--accent)">${S.selIdx} — constituents by RS</h3>`;
+    if (S.selErr) return `<div class="ins-card wide" style="border-color:var(--accent)">${head}
+      <div style="font-size:11px;color:var(--red)">${S.selErr}</div></div>`;
+    if (!S.selSyms) return `<div class="ins-card wide" style="border-color:var(--accent)">${head}
+      <div style="font-size:11px;color:var(--muted)"><span class="spin"></span>Loading constituents…</div></div>`;
+    const mem = S.selSyms.map(s => S.metrics[s]).filter(m => m && m.rs != null)
+      .sort((a, b) => b.rs - a.rs);
+    const miss = S.selSyms.length - mem.length;
+    return `<div class="ins-card wide" style="border-color:var(--accent)">${head}
+      <div style="font-size:10px;color:var(--muted);margin:-6px 0 8px">
+        ${mem.length} of ${S.selSyms.length} constituents priced${miss ? ` (${miss} without data)` : ""} · ranked by stock RS.
+        <b>F&amp;O</b> tag marks derivatives-eligible names.
+      </div>
+      <table class="rot"><thead><tr><th>#</th><th style="text-align:left">Symbol</th><th>LTP</th><th>RS</th>
+        <th>1D</th><th>1W</th><th>1M</th><th>3M</th><th>6M</th><th>ATR%</th><th>Momo</th></tr></thead>
+      <tbody>${mem.map((m, i) => `<tr>
+        <td>${i + 1}</td>
+        <td style="text-align:left"><b>${m.sym}</b>${S.lots[m.sym] ? '<span class="tag vcp" style="margin-left:4px">F&amp;O</span>' : ""}${(S.mtfLev[m.sym] ? `<span class="tag pb" style="margin-left:3px">${S.mtfLev[m.sym]}×</span>` : "")}</td>
+        <td>${fmt(m.last)}</td><td>${rsCell(m.rs)}</td>
+        <td class="${cls(m.d1)}">${pc(m.d1)}</td>
+        <td style="background:${makeHeat(mem.map(x => x.w1), 3)(m.w1)}">${N(m.w1)}</td>
+        <td style="background:${hK1(m.m1)}">${N(m.m1)}</td>
+        <td style="background:${hK3(m.m3)}">${N(m.m3)}</td>
+        <td style="background:${hK6(m.m6)}">${N(m.m6)}</td>
+        <td style="color:#f5a623">${num(m.atrPct)}%</td>
+        <td style="color:var(--accent)">${num(m.momo, 0)}</td></tr>`).join("")}</tbody></table>
+    </div>`;
+  })();
+
+  const secRows = sectorTable();
+  const top5 = topSectors(secRows);          // constituent-built view, kept below
 
   // per-column heat scales, built from the full sector set (not just the top 5)
   const hScore = makeHeat(secRows.map(r => r.score - 50), 10);
@@ -969,6 +1091,8 @@ function renderInsights() {
         Universe median volatility is ${REF_VOL.toFixed(0)}%.
       </div>
     </div>
+    ${nseCard}
+    ${constCard}
     ${secTable}
     ${driverCards}
     ${insightBlock("Top 10 — F&O universe, by Momo",
@@ -994,6 +1118,8 @@ function renderInsights() {
   </div>`;
   const sel = document.getElementById("minAtrSel");
   if (sel) sel.onchange = e => { S.minAtr = parseFloat(e.target.value) || 0; renderInsights(); };
+  el.querySelectorAll("tr[data-idx]").forEach(tr =>
+    tr.onclick = () => openIndex(decodeURIComponent(tr.dataset.idx)));
 }
 
 function renderInsightsOld() {
