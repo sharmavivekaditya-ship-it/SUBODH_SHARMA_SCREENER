@@ -241,10 +241,32 @@ function rsRawOf(m) {
   for (const k of ["m1", "m3", "m6"]) if (m[k] != null) { s += m[k] * RS_W[k]; w += RS_W[k]; }
   return w > 0 ? s / w : null;                 // renormalised if a window is missing
 }
+/* RS is a percentile against a FIXED reference distribution of the whole
+   universe, held in RS_BASIS. Re-percentiling on every change looked correct but
+   made RS drift as you browsed: clicking an index that added 250 unpriced
+   constituents moved existing stocks by up to 17 points, so the same stock
+   showed different RS depending on where you had clicked. The basis is now built
+   once per data refresh; stocks added later are scored INTO it and move nobody. */
+let RS_BASIS = [];
+function buildRsBasis(metrics) {
+  RS_BASIS = Object.values(metrics).map(m => m.rsRaw).filter(x => x != null).sort((a, b) => a - b);
+  return RS_BASIS.length;
+}
+function rsFromBasis(v) {
+  const n = RS_BASIS.length;
+  if (v == null || n < 2) return v == null ? null : 50;
+  let lo = 0, hi = n;                       // first index with RS_BASIS[i] >= v
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (RS_BASIS[mid] < v) lo = mid + 1; else hi = mid; }
+  return Math.round(lo / (n - 1) * 98) + 1;
+}
+/* Rebuild the basis from `metrics` and score everything against it. */
 function assignRS(metrics) {
-  const arr = Object.values(metrics).filter(m => m.rsRaw != null).sort((a, b) => a.rsRaw - b.rsRaw);
-  const n = arr.length;
-  arr.forEach((m, i) => { m.rs = n > 1 ? Math.round(i / (n - 1) * 98) + 1 : 50; });
+  buildRsBasis(metrics);
+  for (const m of Object.values(metrics)) m.rs = rsFromBasis(m.rsRaw);
+}
+/* Score newcomers against the existing basis without disturbing anyone. */
+function scoreIntoBasis(newMetrics) {
+  for (const m of Object.values(newMetrics)) m.rs = rsFromBasis(m.rsRaw);
 }
 // Annualised volatility of daily returns (path smoothness) over `p` sessions.
 function volOf(cl, p = 63) {
@@ -813,17 +835,62 @@ const rsCell = rs => `<b style="color:${rsColor(rs)}">${rs ?? "–"}</b>`;
 /* ================= Official NSE index screen =================
    1-5 top 25 by 6M/3M/1M/1W/1D  ->  6 keep those in >=3 lists
    7 rank by RS  ->  8 click through to constituents ranked by stock RS      */
-async function loadNseIndices(force) {
-  if (S.nseIdx && !force) return;
-  if (S.nseBusy) return;
-  S.nseBusy = true;
-  try {
-    const r = await fetch("/api/nse-indices", { cache: "no-store" });
-    if (r.ok) { const j = await r.json(); if (j.list) S.nseIdx = j; }
-    else S.nseErr = "HTTP " + r.status;
-  } catch (e) { S.nseErr = String(e); }
-  S.nseBusy = false;
-  if (S.view === "insights") renderInsights();
+/* Index returns are computed from official NSE constituent lists rather than the
+   daily-snapshot files. NSE only retains those snapshots for a short window —
+   the 1W file exists but the 6M one 404s — so 1M/3M/6M came back null for every
+   index and nothing could ever appear in 3 of 5 lists. We already hold a year of
+   daily history for every constituent, so every window is computed the same way:
+   an equal-weighted mean of member returns. Consistent across all timeframes and
+   always available. (NSE's own indices are free-float cap-weighted, so levels
+   differ from the headline print; relative ranking is what matters here.) */
+const IDX_W = { d1: 0.10, w1: 0.15, m1: 0.30, m3: 0.25, m6: 0.20 };
+const IDX_TOP_N = 25, IDX_MIN_HITS = 3;
+
+function computeIndexScreen() {
+  const names = Object.keys(SECTORS);
+  if (!names.length || !Object.keys(S.metrics).length) return null;
+  const rows = [];
+  for (const name of names) {
+    const mm = (SECTORS[name] || []).map(s => S.metrics[s]).filter(Boolean);
+    if (mm.length < 3) continue;
+    const avg = f => { const v = mm.map(f).filter(x => x != null); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
+    const r = { index: name, n: mm.length, members: mm,
+      d1: avg(m => m.d1), w1: avg(m => m.w1), m1: avg(m => m.m1), m3: avg(m => m.m3), m6: avg(m => m.m6) };
+    if ([r.d1, r.w1, r.m1, r.m3, r.m6].filter(x => x != null).length < 3) continue;
+    let s = 0, w = 0;
+    for (const k of Object.keys(IDX_W)) if (r[k] != null) { s += r[k] * IDX_W[k]; w += IDX_W[k]; }
+    r.blend = w > 0 ? s / w : null;
+    rows.push(r);
+  }
+  if (rows.length < 5) return null;
+
+  // 1-5: a top-N list per timeframe
+  const tops = {};
+  for (const k of Object.keys(IDX_W))
+    tops[k] = rows.filter(r => r[k] != null).sort((a, b) => b[k] - a[k]).slice(0, IDX_TOP_N).map(r => r.index);
+
+  // 6: appear in at least MIN_HITS of the five
+  const hits = {};
+  for (const k of Object.keys(IDX_W)) for (const nm of tops[k]) (hits[nm] = hits[nm] || []).push(k);
+
+  // 7: RS percentiled across EVERY index, not just survivors
+  const scale = rows.filter(r => r.blend != null).sort((a, b) => a.blend - b.blend);
+  const rsOf = {};
+  scale.forEach((r, i) => { rsOf[r.index] = scale.length > 1 ? Math.round(i / (scale.length - 1) * 98) + 1 : 50; });
+
+  const list = rows
+    .filter(r => (hits[r.index] || []).length >= IDX_MIN_HITS)
+    .map(r => ({ ...r, rs: rsOf[r.index], hits: hits[r.index], hitCount: hits[r.index].length }))
+    .sort((a, b) => b.blend - a.blend);
+
+  return { list, totalIndices: rows.length, rsBasis: scale.length,
+           topN: IDX_TOP_N, minHits: IDX_MIN_HITS, tops };
+}
+
+function loadNseIndices() {
+  const res = computeIndexScreen();
+  if (res) { S.nseIdx = res; S.nseErr = null; }
+  else S.nseErr = "Waiting for index constituents and price data…";
 }
 
 async function openIndex(name) {
@@ -869,8 +936,8 @@ async function openIndex(name) {
         add[sym].rsRaw = rsRawOf(add[sym]);
         add[sym].atrPct = add[sym].atr20 && last ? add[sym].atr20 / last * 100 : null;
       }
+      scoreIntoBasis(add);              // score against the fixed basis, shift nobody
       Object.assign(S.metrics, add);
-      assignRS(S.metrics);              // re-percentile with the new names included
     }
   } catch (e) {
     S.selErr = e && e.name === "AbortError"
@@ -887,24 +954,22 @@ function renderInsights() {
   const el = document.getElementById("insights");
   const N = v => v == null ? "–" : (v >= 0 ? "+" : "") + v.toFixed(1) + "%";
   const num = (v, d = 2) => v == null ? "–" : v.toFixed(d);
-  if (!S.nseIdx && !S.nseErr) loadNseIndices();
+  loadNseIndices();                     // cheap: recomputed from data already loaded
 
   // ---- 1-7: strongest indices across timeframes ----------------------------
   const NI = S.nseIdx;
   const nseCard = (() => {
-    if (S.nseErr && !NI) return `<div class="ins-card wide" style="border-color:var(--red)">
-      <h3 style="color:var(--red)">NSE index data unavailable</h3>
-      <div style="font-size:11px;color:var(--muted)">${S.nseErr}</div>
-      <button class="tgl" id="nseRetry" style="margin-top:8px">Retry</button></div>`;
     if (!NI) return `<div class="ins-card wide"><h3>Strongest NSE Indices</h3>
-      <div style="font-size:11px;color:var(--muted)"><span class="spin"></span>Loading official NSE index closes…</div></div>`;
+      <div style="font-size:11px;color:var(--muted)"><span class="spin"></span>
+      ${S.nseErr || "Loading NSE index constituents and prices…"}
+      (${Object.keys(SECTORS).length} indices · ${Object.keys(S.metrics).length} stocks priced)</div></div>`;
     const L = NI.list;
     const hc = (k, f) => makeHeat(L.map(r => r[k]), f);
     const H1 = hc("d1", 1.5), H2 = hc("w1", 3), H3 = hc("m1", 6), H4 = hc("m3", 10), H5 = hc("m6", 15);
     return `<div class="ins-card wide" style="border-color:var(--green)">
       <h3 style="color:var(--green)">Strongest NSE Indices — top ${NI.topN} in at least ${NI.minHits} of 5 timeframes</h3>
       <div style="font-size:10px;color:var(--muted);margin:-6px 0 8px">
-        Official NSE index closes · ${NI.totalIndices} equity indices screened · as of ${NI.asOf}.
+        ${NI.totalIndices} official NSE indices · equal-weighted from NSE's own constituent lists.
         Each timeframe has its own top-${NI.topN} list; only indices in ≥${NI.minHits} of the five survive.
         <b style="color:var(--text)">RS is a percentile across all ${NI.rsBasis || NI.totalIndices} screened indices</b>, not just these survivors —
         so every index in this table is strong by construction, and even the lowest row here sits well above the market.
@@ -964,8 +1029,6 @@ function renderInsights() {
   el.innerHTML = `<div class="ins-grid">${nseCard}${constCard}</div>`;
   el.querySelectorAll("tr[data-idx]").forEach(tr =>
     tr.onclick = () => openIndex(decodeURIComponent(tr.dataset.idx)));
-  const rb = document.getElementById("nseRetry");
-  if (rb) rb.onclick = () => { S.nseErr = null; loadNseIndices(true); renderInsights(); };
 }
 
 /* ================= Fullscreen modal ================= */
