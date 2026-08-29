@@ -799,11 +799,6 @@ function makeHeat(values, floor = 4) {
     return v >= 0 ? `rgba(38,166,154,${alpha.toFixed(3)})` : `rgba(239,83,80,${alpha.toFixed(3)})`;
   };
 }
-/* text turns white once the cell background is dark enough to hurt contrast */
-function heatText(v, scale) {
-  if (v == null) return "";
-  return Math.abs(v) / scale > 0.55 ? ";color:#fff;font-weight:600" : "";
-}
 // fallback fixed-scale heat (used where a column scale isn't meaningful)
 const heat = makeHeat([], 12);
 
@@ -868,87 +863,32 @@ async function openIndex(name) {
 }
 
 /* ---- constructed sector indices: equal-weighted composite of member returns ---- */
-function sectorTable() {
-  const rows = [];
-  for (const [sec, list] of Object.entries(SECTORS)) {
-    const mm = list.map(s => S.metrics[s]).filter(m => m && m.m1 != null);
-    if (mm.length < 2) continue;
-    const avg = f => { const v = mm.map(f).filter(x => x != null); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
-    const med = f => { const v = mm.map(f).filter(x => x != null).sort((a, b) => a - b);
-      return v.length ? v[Math.floor(v.length / 2)] : null; };
-    const r = {
-      sec, n: mm.length, members: mm,
-      // the SECTOR's own growth = equal-weighted mean of its constituents' growth
-      m1: avg(m => m.m1), m3: avg(m => m.m3), m6: avg(m => m.m6),
-      avgMemberRS: avg(m => m.rs),
-      momo: med(m => m.momo),
-      atrPct: avg(m => m.atrPct),
-      leaders: mm.filter(m => m.rs >= 80).length
-    };
-    // Sector growth = MEAN OF MEMBER COMPOSITES, not the composite of the mean
-    // returns. Those are equal only when every member has all three windows; a
-    // recently listed member renormalises its own weights and breaks linearity
-    // (measured ~0.9pt divergence). Taking the mean of composites guarantees the
-    // contribution identity below: sum(member growth / n) == sector growth.
-    r.growth = avg(m => rsRawOf(m));
-    rows.push(r);
-  }
-  // Percentile each sector against the OTHER SECTORS on its own growth -> 1-99.
-  const g = rows.filter(r => r.growth != null).sort((a, b) => a.growth - b.growth);
-  g.forEach((r, i) => { r.rs = g.length > 1 ? Math.round(i / (g.length - 1) * 98) + 1 : 50; });
-  rows.forEach(r => { r.score = r.growth; });
-  return rows;
-}
-function topSectors(rows, n = 5) {
-  return [...rows].filter(r => r.growth != null).sort((a, b) => b.growth - a.growth).slice(0, n);
-}
-/* Who is PULLING the sector: in an equal-weighted index each member contributes
-   (its own growth composite / n) percentage points to the sector's growth, and
-   those contributions sum exactly to the sector number. */
-function sectorPullers(r, minAtr, n = 5) {
-  return r.members
-    .map(m => ({ m, growth: rsRawOf(m), contrib: rsRawOf(m) / r.n }))
-    .filter(x => x.growth != null && (!minAtr || (x.m.atrPct || 0) >= minAtr))
-    .sort((a, b) => b.contrib - a.contrib)
-    .slice(0, n);
-}
-
-function insightBlock(title, sub, cols, items, fmtRow, accent) {
-  return `<div class="ins-card wide" style="border-color:${accent}">
-    <h3 style="color:${accent}">${title}</h3>
-    ${sub ? `<div style="font-size:10px;color:var(--muted);margin:-6px 0 8px">${sub}</div>` : ""}
-    <table class="rot"><thead><tr>${cols}</tr></thead><tbody>
-    ${items.length ? items.map(fmtRow).join("") : `<tr><td colspan="9" style="color:var(--muted)">No data yet.</td></tr>`}
-    </tbody></table></div>`;
-}
-
+/* ================= Insights: official NSE index screen only ================= */
 function renderInsights() {
   const ms = Object.values(S.metrics);
   const el = document.getElementById("insights");
-  if (!ms.length) { el.innerHTML = '<div id="msg"><span class="spin"></span>Loading…</div>'; return; }
   const N = v => v == null ? "–" : (v >= 0 ? "+" : "") + v.toFixed(1) + "%";
   const num = (v, d = 2) => v == null ? "–" : v.toFixed(d);
-  const minAtr = S.minAtr || 0;              // optional tradability floor
   if (!S.nseIdx && !S.nseErr) loadNseIndices();
 
-  // ---- Official NSE index screen -------------------------------------------
+  // ---- 1-7: strongest indices across timeframes ----------------------------
   const NI = S.nseIdx;
   const nseCard = (() => {
     if (S.nseErr && !NI) return `<div class="ins-card wide" style="border-color:var(--red)">
       <h3 style="color:var(--red)">NSE index data unavailable</h3>
-      <div style="font-size:11px;color:var(--muted)">${S.nseErr}. Falling back to constituent-built sectors below.</div></div>`;
-    if (!NI) return `<div class="ins-card wide"><h3>Official NSE indices</h3>
-      <div style="font-size:11px;color:var(--muted)"><span class="spin"></span>Loading official index closes…</div></div>`;
+      <div style="font-size:11px;color:var(--muted)">${S.nseErr}</div>
+      <button class="tgl" id="nseRetry" style="margin-top:8px">Retry</button></div>`;
+    if (!NI) return `<div class="ins-card wide"><h3>Strongest NSE Indices</h3>
+      <div style="font-size:11px;color:var(--muted)"><span class="spin"></span>Loading official NSE index closes…</div></div>`;
     const L = NI.list;
-    const hLbl = { d1: "1D", w1: "1W", m1: "1M", m3: "3M", m6: "6M" };
-    const hc = k => makeHeat(L.map(r => r[k]), k === "d1" ? 1.5 : k === "w1" ? 3 : k === "m1" ? 6 : k === "m3" ? 10 : 15);
-    const H1 = hc("d1"), H2 = hc("w1"), H3 = hc("m1"), H4 = hc("m3"), H5 = hc("m6");
+    const hc = (k, f) => makeHeat(L.map(r => r[k]), f);
+    const H1 = hc("d1", 1.5), H2 = hc("w1", 3), H3 = hc("m1", 6), H4 = hc("m3", 10), H5 = hc("m6", 15);
     return `<div class="ins-card wide" style="border-color:var(--green)">
-      <h3 style="color:var(--green)">Strongest NSE Indices — in the top ${NI.topN} of at least ${NI.minHits} of 5 timeframes</h3>
+      <h3 style="color:var(--green)">Strongest NSE Indices — top ${NI.topN} in at least ${NI.minHits} of 5 timeframes</h3>
       <div style="font-size:10px;color:var(--muted);margin:-6px 0 8px">
-        Official NSE closes (${NI.totalIndices} equity indices, as of ${NI.asOf}). Each timeframe gets its own top-${NI.topN} list;
-        only indices appearing in ≥${NI.minHits} of the five survive, then they are ranked by RS.
-        <b style="color:var(--text)">Click any row</b> to see its constituents ranked by stock RS.
+        Official NSE index closes · ${NI.totalIndices} equity indices screened · as of ${NI.asOf}.
+        Each timeframe has its own top-${NI.topN} list; only indices in ≥${NI.minHits} of the five survive, then ranked by RS.
+        <b style="color:var(--text)">Click a row</b> for its constituents ranked by stock RS.
       </div>
       <table class="rot"><thead><tr><th>#</th><th style="text-align:left">Index</th><th>RS</th><th>In</th>
         <th>1D</th><th>1W</th><th>1M</th><th>3M</th><th>6M</th></tr></thead>
@@ -962,11 +902,11 @@ function renderInsights() {
         <td style="background:${H3(r.m1)}">${N(r.m1)}</td>
         <td style="background:${H4(r.m3)}">${N(r.m3)}</td>
         <td style="background:${H5(r.m6)}">${N(r.m6)}</td></tr>`).join("")
-        : '<tr><td colspan="9" style="color:var(--muted)">No index is strong across ≥3 timeframes right now.</td></tr>'}</tbody></table>
+        : `<tr><td colspan="9" style="color:var(--muted)">No index is strong across ≥${NI.minHits} timeframes right now.</td></tr>`}</tbody></table>
     </div>`;
   })();
 
-  // ---- constituents of the clicked index, ranked by stock RS ---------------
+  // ---- 8: constituents of the clicked index, ranked by stock RS ------------
   const constCard = (() => {
     if (!S.selIdx) return "";
     const head = `<h3 style="color:var(--accent)">${S.selIdx} — constituents by RS</h3>`;
@@ -974,198 +914,36 @@ function renderInsights() {
       <div style="font-size:11px;color:var(--red)">${S.selErr}</div></div>`;
     if (!S.selSyms) return `<div class="ins-card wide" style="border-color:var(--accent)">${head}
       <div style="font-size:11px;color:var(--muted)"><span class="spin"></span>Loading constituents…</div></div>`;
-    const mem = S.selSyms.map(s => S.metrics[s]).filter(m => m && m.rs != null)
-      .sort((a, b) => b.rs - a.rs);
+    const mem = S.selSyms.map(s => S.metrics[s]).filter(m => m && m.rs != null).sort((a, b) => b.rs - a.rs);
     const miss = S.selSyms.length - mem.length;
+    const hW = makeHeat(mem.map(x => x.w1), 3), h1 = makeHeat(mem.map(x => x.m1), 5),
+          h3 = makeHeat(mem.map(x => x.m3), 10), h6 = makeHeat(mem.map(x => x.m6), 15);
     return `<div class="ins-card wide" style="border-color:var(--accent)">${head}
       <div style="font-size:10px;color:var(--muted);margin:-6px 0 8px">
-        ${mem.length} of ${S.selSyms.length} constituents priced${miss ? ` (${miss} without data)` : ""} · ranked by stock RS.
-        <b>F&amp;O</b> tag marks derivatives-eligible names.
+        ${mem.length} of ${S.selSyms.length} constituents priced${miss ? ` · ${miss} without data` : ""} · ranked by stock RS.
+        Tags: <span class="tag vcp">F&amp;O</span> derivatives-eligible, <span class="tag pb">n×</span> Zerodha MTF leverage.
       </div>
       <table class="rot"><thead><tr><th>#</th><th style="text-align:left">Symbol</th><th>LTP</th><th>RS</th>
         <th>1D</th><th>1W</th><th>1M</th><th>3M</th><th>6M</th><th>ATR%</th><th>Momo</th></tr></thead>
       <tbody>${mem.map((m, i) => `<tr>
         <td>${i + 1}</td>
-        <td style="text-align:left"><b>${m.sym}</b>${S.lots[m.sym] ? '<span class="tag vcp" style="margin-left:4px">F&amp;O</span>' : ""}${(S.mtfLev[m.sym] ? `<span class="tag pb" style="margin-left:3px">${S.mtfLev[m.sym]}×</span>` : "")}</td>
+        <td style="text-align:left"><b>${m.sym}</b>${S.lots[m.sym] ? '<span class="tag vcp" style="margin-left:4px">F&amp;O</span>' : ""}${S.mtfLev[m.sym] ? `<span class="tag pb" style="margin-left:3px">${S.mtfLev[m.sym]}×</span>` : ""}</td>
         <td>${fmt(m.last)}</td><td>${rsCell(m.rs)}</td>
         <td class="${cls(m.d1)}">${pc(m.d1)}</td>
-        <td style="background:${makeHeat(mem.map(x => x.w1), 3)(m.w1)}">${N(m.w1)}</td>
-        <td style="background:${hK1(m.m1)}">${N(m.m1)}</td>
-        <td style="background:${hK3(m.m3)}">${N(m.m3)}</td>
-        <td style="background:${hK6(m.m6)}">${N(m.m6)}</td>
+        <td style="background:${hW(m.w1)}">${N(m.w1)}</td>
+        <td style="background:${h1(m.m1)}">${N(m.m1)}</td>
+        <td style="background:${h3(m.m3)}">${N(m.m3)}</td>
+        <td style="background:${h6(m.m6)}">${N(m.m6)}</td>
         <td style="color:#f5a623">${num(m.atrPct)}%</td>
         <td style="color:var(--accent)">${num(m.momo, 0)}</td></tr>`).join("")}</tbody></table>
     </div>`;
   })();
 
-  const secRows = sectorTable();
-  const top5 = topSectors(secRows);          // constituent-built view, kept below
-
-  // per-column heat scales, built from the full sector set (not just the top 5)
-  const hScore = makeHeat(secRows.map(r => r.score - 50), 10);
-  const hS1 = makeHeat(secRows.map(r => r.m1), 3);
-  const hS3 = makeHeat(secRows.map(r => r.m3), 6);
-  const hS6 = makeHeat(secRows.map(r => r.m6), 10);
-  // stock-level scales, built from the whole universe
-  const hK1 = makeHeat(ms.map(m => m.m1), 5);
-  const hK3 = makeHeat(ms.map(m => m.m3), 10);
-  const hK6 = makeHeat(ms.map(m => m.m6), 15);
-
-  // ---- 1. the 5 strongest sectors overall -------------------------------------
-  const secTable = `
-    <div class="ins-card wide" style="border-color:var(--green)">
-      <h3 style="color:var(--green)">Top 5 Sectors — percentiled on their own growth</h3>
-      <table class="rot"><thead><tr><th>#</th><th style="text-align:left">Sector</th><th title="percentile of this sector's growth vs all other sectors">Sector RS</th><th title="weighted 1M/3M/6M growth of the sector itself">Growth</th><th>1M</th><th>3M</th><th>6M</th><th title="members with stock RS >= 80">Leaders</th><th title="median Clenow momentum">Momo</th><th>ATR%</th><th>n</th></tr></thead>
-      <tbody>${top5.map((r, i) => `<tr>
-        <td>${i + 1}</td><td style="text-align:left"><b style="color:${i === 0 ? "var(--green)" : "var(--text)"}">${r.sec.replace(/^NIFTY /, "")}</b></td>
-        <td><b style="color:${rsColor(r.rs)}">${r.rs == null ? "–" : r.rs.toFixed(0)}</b></td>
-        <td style="background:${hScore(r.growth)}"><b>${N(r.growth)}</b></td>
-        <td style="background:${hS1(r.m1)}">${N(r.m1)}</td>
-        <td style="background:${hS3(r.m3)}">${N(r.m3)}</td>
-        <td style="background:${hS6(r.m6)}">${N(r.m6)}</td>
-        <td><b>${r.leaders}</b><span style="color:var(--muted)">/${r.n}</span></td>
-        <td style="color:var(--accent)">${num(r.momo, 0)}</td>
-        <td style="color:#f5a623">${num(r.atrPct)}%</td>
-        <td style="color:var(--muted)">${r.n}</td></tr>`).join("")}</tbody></table>
-      <div style="font-size:10px;color:var(--muted);margin-top:6px">
-        Each sector's own growth = equal-weighted mean of its constituents, blended ${RS_W.m1 * 100}% 1M + ${RS_W.m3 * 100}% 3M + ${RS_W.m6 * 100}% 6M,
-        then percentiled <b>against the other ${secRows.length} sectors</b> (Sector RS 99 = strongest sector, 50 = median sector).
-        <b>Leaders</b> = members whose own stock RS ≥ 80, so you can see whether the sector is broad or carried by a few names.
-      </div>
-    </div>`;
-
-  // ---- 2. top 5 stocks driving each of those sectors, by VaRS -----------------
-  const driverCards = top5.map((r, si) => {
-    const pull = sectorPullers(r, minAtr, 5);
-    const share = pull.reduce((s, x) => s + x.contrib, 0);
-    return `<div class="ins-card">
-      <h3 style="color:var(--green)">${si + 1}. ${r.sec.replace(/^NIFTY /, "")}
-        <span style="color:var(--muted);font-weight:400">— top 5 pullers</span></h3>
-      <div style="font-size:10px;color:var(--muted);margin:-6px 0 6px">
-        These 5 contribute <b style="color:var(--green)">${N(share)}</b> of the sector's <b>${N(r.growth)}</b>
-        (${r.growth ? (share / r.growth * 100).toFixed(0) : "–"}% of the move, from ${(5 / r.n * 100).toFixed(0)}% of the members)
-      </div>
-      <table class="rot"><thead><tr><th style="text-align:left">Symbol</th><th title="this stock's share of the sector's growth">Contrib</th><th>Growth</th><th>1M</th><th>3M</th><th>6M</th><th>RS</th><th>ATR%</th><th>Momo</th></tr></thead>
-      <tbody>${pull.length ? pull.map(({ m, growth, contrib }) => `<tr>
-        <td style="text-align:left"><b>${m.sym}</b>${S.lots[m.sym] ? '<span class="tag vcp" style="margin-left:4px">F&amp;O</span>' : ""}</td>
-        <td><b style="color:var(--green)">${N(contrib)}</b></td>
-        <td>${N(growth)}</td>
-        <td style="background:${hK1(m.m1)}">${N(m.m1)}</td>
-        <td style="background:${hK3(m.m3)}">${N(m.m3)}</td>
-        <td style="background:${hK6(m.m6)}">${N(m.m6)}</td>
-        <td>${rsCell(m.rs)}</td>
-        <td style="color:#f5a623">${num(m.atrPct)}%</td>
-        <td style="color:var(--accent)">${num(m.momo, 0)}</td></tr>`).join("")
-        : '<tr><td colspan="9" style="color:var(--muted)">No constituent data.</td></tr>'}</tbody></table>
-    </div>`;
-  }).join("");
-
-  // ---- 3. AtVaRS in F&O, 4. AtMVaRS in MTF ------------------------------------
-  const fnoSet = new Set(S.lists.fno), mtfSet = new Set(S.lists.mtf);
-  const pick = set => ms.filter(m => set.has(m.sym) && m.momo != null && (!minAtr || (m.atrPct || 0) >= minAtr))
-    .sort((a, b) => b.momo - a.momo).slice(0, 10);
-  const atv = pick(fnoSet), atm = pick(mtfSet);
-
-  el.innerHTML = `<div class="ins-grid">
-    <div class="ins-card wide" style="padding:10px 14px">
-      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
-        <h3 style="margin:0">Best Sectors → Best Stocks —
-          ${secRows.length} ${SECTOR_SRC === "NSE" ? '<span style="color:var(--green)">official NSE sectoral indices</span>' : "sector groups (bundled fallback)"}
-          · ${ms.length} stocks</h3>
-        <label class="ctl" style="margin-left:auto">Min ATR%
-          <select id="minAtrSel">
-            ${[0, 1.5, 2, 2.5, 3, 4].map(v => `<option value="${v}"${minAtr === v ? " selected" : ""}>${v ? v + "%" : "off"}</option>`).join("")}
-          </select>
-        </label>
-      </div>
-      <div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.6">
-        ${SECTOR_SRC === "NSE"
-          ? "Sector membership is NSE's own published index constituent list (niftyindices.com), refreshed daily — not a hand-built map. Sector performance is computed from those exact constituents."
-          : "⚠ NSE index feed unavailable; using the bundled sector map."}<br>
-        <b style="color:var(--text)">Sectors</b> are ranked on their <i>own</i> growth (${RS_W.m1 * 100}% 1M + ${RS_W.m3 * 100}% 3M + ${RS_W.m6 * 100}% 6M),
-        percentiled against each other. <b style="color:var(--text)">Pullers</b> are the members contributing most to that growth —
-        in an equal-weighted index each member adds (its own growth ÷ member count) percentage points, and those contributions sum exactly to the sector figure.
-        <b style="color:var(--accent)">Momo</b> (Clenow slope × R²) and stock <b>RS</b> are shown as quality context, not as the pulling rank.<br>
-        <b style="color:#f5a623">ATR%</b> and <b style="color:#c39bd3">leverage</b> are shown for tradability and position sizing — deliberately
-        <i>not</i> baked into the ranking. Use the Min ATR% filter to exclude names too quiet to trade.
-        Universe median volatility is ${REF_VOL.toFixed(0)}%.
-      </div>
-    </div>
-    ${nseCard}
-    ${constCard}
-    ${secTable}
-    ${driverCards}
-    ${insightBlock("Top 10 — F&O universe, by Momo",
-      `Strongest smooth trends among derivatives-eligible names. Lot size shown for sizing.${minAtr ? ` Filtered to ATR% ≥ ${minAtr}.` : ""}`,
-      `<th>#</th><th style="text-align:left">Symbol</th><th style="text-align:left">Sector</th><th>LTP</th><th>Lot</th><th>1M</th><th>3M</th><th>RS</th><th>ATR%</th><th>Momo</th>`,
-      atv, (m, i) => `<tr><td>${i + 1}</td><td><b>${m.sym}</b></td>
-        <td style="text-align:left;color:var(--muted);font-size:10px">${SYM_SECTOR[m.sym] || ""}</td>
-        <td>${fmt(m.last)}</td><td style="color:var(--muted)">${S.lots[m.sym] ?? "–"}</td>
-        <td style="background:${hK1(m.m1)}">${N(m.m1)}</td><td style="background:${hK3(m.m3)}">${N(m.m3)}</td>
-        <td>${rsCell(m.rs)}</td>
-        <td style="color:#f5a623">${num(m.atrPct)}%</td>
-        <td><b style="color:var(--accent)">${num(m.momo, 0)}</b></td></tr>`, "var(--accent)")}
-    ${insightBlock("Top 10 — MTF universe, by Momo",
-      `Strongest smooth trends among MTF-eligible cash stocks. ${S.mtfLevExact ? "Leverage is real Zerodha data, shown for position sizing — it does not affect this ranking." : "⚠ leverage data not loaded."}${minAtr ? ` Filtered to ATR% ≥ ${minAtr}.` : ""}`,
-      `<th>#</th><th style="text-align:left">Symbol</th><th style="text-align:left">Sector</th><th>LTP</th><th>Lev</th><th>1M</th><th>3M</th><th>RS</th><th>ATR%</th><th>Momo</th>`,
-      atm, (m, i) => `<tr><td>${i + 1}</td><td><b>${m.sym}</b></td>
-        <td style="text-align:left;color:var(--muted);font-size:10px">${SYM_SECTOR[m.sym] || ""}</td>
-        <td>${fmt(m.last)}</td><td><b style="color:#c39bd3">${(S.mtfLev[m.sym] || S.mtfLevDefault)}×</b></td>
-        <td style="background:${hK1(m.m1)}">${N(m.m1)}</td><td style="background:${hK3(m.m3)}">${N(m.m3)}</td>
-        <td>${rsCell(m.rs)}</td>
-        <td style="color:#f5a623">${num(m.atrPct)}%</td>
-        <td><b style="color:#c39bd3">${num(m.momo, 0)}</b></td></tr>`, "#9b59b6")}
-  </div>`;
-  const sel = document.getElementById("minAtrSel");
-  if (sel) sel.onchange = e => { S.minAtr = parseFloat(e.target.value) || 0; renderInsights(); };
+  el.innerHTML = `<div class="ins-grid">${nseCard}${constCard}</div>`;
   el.querySelectorAll("tr[data-idx]").forEach(tr =>
     tr.onclick = () => openIndex(decodeURIComponent(tr.dataset.idx)));
-}
-
-function renderInsightsOld() {
-  const ms = Object.values(S.metrics);
-  const el = document.getElementById("insights");
-  if (!ms.length) { el.innerHTML = '<div id="msg"><span class="spin"></span>Loading…</div>'; return; }
-  const n = ms.length;
-  const cnt = k => ms.filter(m => m[k] === true).length;
-  const hasB = ms.some(m => m.a20 != null);
-  const adv = ms.filter(m => (m.d1 ?? 0) > 0).length, dec = ms.filter(m => (m.d1 ?? 0) < 0).length;
-  const bar = (lbl, c) => `<div class="bt"><span class="lbl">${lbl}</span><div class="track"><div class="fill" style="width:${(c / n * 100).toFixed(0)}%;background:${c / n >= .5 ? "var(--green)" : "var(--red)"}"></div></div><span class="val">${c}/${n} · ${(c / n * 100).toFixed(0)}%</span></div>`;
-
-  const bins = [[-1e9,-10],[-10,-5],[-5,0],[0,5],[5,10],[10,1e9]], labels = ["<-10%","-10:-5","-5:0","0:+5","+5:+10",">+10%"];
-  const bc = bins.map(([a, b]) => ms.filter(m => m.m1 != null && m.m1 > a && m.m1 <= b).length);
-  const bmax = Math.max(...bc, 1);
-  const hist = bc.map((c, i) => `<div class="hbin"><span>${c}</span><div class="bar" style="height:${Math.max(c / bmax * 84, 2).toFixed(0)}px;background:${i < 3 ? "var(--red)" : "var(--green)"};opacity:.85"></div><span>${labels[i]}</span></div>`).join("");
-
-  const avg = a => { const v = a.filter(x => x != null); return v.length ? v.reduce((x, y) => x + y, 0) / v.length : null; };
-  const rows = Object.entries(SECTORS).map(([sec, list]) => {
-    const mm = list.map(s => S.metrics[s]).filter(Boolean);
-    if (!mm.length) return null;
-    return { sec, cnt: mm.length, d1: avg(mm.map(m => m.d1)), w1: avg(mm.map(m => m.w1)), m1: avg(mm.map(m => m.m1)),
-             m3: avg(mm.map(m => m.m3)), m6: avg(mm.map(m => m.m6)), y1: avg(mm.map(m => m.y1)) };
-  }).filter(Boolean).sort((a, b) => (b.m1 ?? -99) - (a.m1 ?? -99));
-  const cell = v => `<td style="background:${heat(v)}">${v == null ? "–" : (v >= 0 ? "+" : "") + v.toFixed(1) + "%"}</td>`;
-  const rot = rows.map(r => `<tr><td>${r.sec} <span style="color:var(--muted);font-weight:400">(${r.cnt})</span></td>${cell(r.d1)}${cell(r.w1)}${cell(r.m1)}${cell(r.m3)}${cell(r.m6)}${cell(r.y1)}</tr>`).join("");
-
-  const withHi = ms.filter(m => m.hi52 != null);
-  const near = withHi.filter(m => m.hi52 >= -5).length;
-  const top = [...withHi].sort((a, b) => b.hi52 - a.hi52).slice(0, 12);
-  const hiRows = top.map(m => `<div><span>${m.sym}</span><span class="${m.hi52 >= -2 ? "up" : ""}">${m.hi52.toFixed(1)}%</span></div>`).join("");
-
-  el.innerHTML = `<div class="ins-grid">
-    <div class="ins-card"><h3>Market Breadth — trend health</h3>
-      ${hasB ? bar("Above 20 DMA", cnt("a20")) + bar("Above 50 DMA", cnt("a50")) + bar("Above 200 DMA", cnt("a200"))
-             : '<div style="color:var(--muted);font-size:11px;margin-bottom:8px">DMA breadth appears after the next data refresh.</div>'}
-      <div style="margin-top:12px" class="bt"><span class="lbl">Adv / Decline</span><div class="adbar" style="flex:1"><div style="background:var(--green);width:${(adv / (adv + dec || 1) * 100).toFixed(0)}%;display:flex;align-items:center;padding-left:6px">${adv}</div><div style="background:var(--red);flex:1;display:flex;align-items:center;justify-content:flex-end;padding-right:6px">${dec}</div></div><span class="val"></span></div>
-    </div>
-    <div class="ins-card"><h3>1-Month Return Distribution</h3><div class="hist">${hist}</div>
-      <div style="margin-top:10px;font-size:11px;color:var(--muted)"><b style="color:var(--text)">${near}</b> of ${withHi.length} stocks within 5% of their 52-week high</div>
-    </div>
-    <div class="ins-card wide"><h3>Sector Rotation — average returns, ranked by 1M</h3>
-      <table class="rot"><thead><tr><th>Sector</th><th>1D</th><th>1W</th><th>1M</th><th>3M</th><th>6M</th><th>1Y</th></tr></thead><tbody>${rot}</tbody></table>
-    </div>
-    <div class="ins-card wide"><h3>Distance from 52-Week High — momentum leaders</h3><div class="hilist">${hiRows}</div></div>
-  </div>`;
+  const rb = document.getElementById("nseRetry");
+  if (rb) rb.onclick = () => { S.nseErr = null; loadNseIndices(true); renderInsights(); };
 }
 
 /* ================= Fullscreen modal ================= */
