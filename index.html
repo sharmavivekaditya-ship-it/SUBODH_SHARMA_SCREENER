@@ -830,10 +830,24 @@ async function openIndex(name) {
   S.selIdx = name; S.selSyms = null; S.selErr = null;
   renderInsights();
   try {
-    const r = await fetch(`/api/index-constituents?index=${encodeURIComponent(name)}`, { cache: "no-store" });
-    if (!r.ok) { S.selErr = "Constituent list not published for this index."; renderInsights(); return; }
+    // hard timeout — a hanging upstream must surface as an error, not a spinner
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), 25000);
+    let r;
+    try {
+      r = await fetch(`/api/index-constituents?index=${encodeURIComponent(name)}`,
+        { cache: "no-store", signal: ac.signal });
+    } finally { clearTimeout(t); }
+    if (!r.ok) {
+      let msg = "NSE does not publish a constituent file for this index.";
+      try { const e = await r.json(); if (e.error) msg = e.error; } catch (_) {}
+      S.selErr = msg; renderInsights(); return;
+    }
     const j = await r.json();
     S.selSyms = j.symbols || [];
+    S.selFile = j.file || null;
+    if (!S.selSyms.length) { S.selErr = "Constituent file was empty."; renderInsights(); return; }
+    renderInsights();                      // show the list immediately…
     // price anything we don't already have, so RS is available for every member
     const missing = S.selSyms.filter(s => !S.metrics[s]);
     if (missing.length) {
@@ -858,8 +872,12 @@ async function openIndex(name) {
       Object.assign(S.metrics, add);
       assignRS(S.metrics);              // re-percentile with the new names included
     }
-  } catch (e) { S.selErr = String(e); }
-  renderInsights();
+  } catch (e) {
+    S.selErr = e && e.name === "AbortError"
+      ? "Timed out fetching constituents from NSE — try again."
+      : String(e);
+  }
+  renderInsights();                     // …then again once prices are in
 }
 
 /* ---- constructed sector indices: equal-weighted composite of member returns ---- */
@@ -887,7 +905,9 @@ function renderInsights() {
       <h3 style="color:var(--green)">Strongest NSE Indices — top ${NI.topN} in at least ${NI.minHits} of 5 timeframes</h3>
       <div style="font-size:10px;color:var(--muted);margin:-6px 0 8px">
         Official NSE index closes · ${NI.totalIndices} equity indices screened · as of ${NI.asOf}.
-        Each timeframe has its own top-${NI.topN} list; only indices in ≥${NI.minHits} of the five survive, then ranked by RS.
+        Each timeframe has its own top-${NI.topN} list; only indices in ≥${NI.minHits} of the five survive.
+        <b style="color:var(--text)">RS is a percentile across all ${NI.rsBasis || NI.totalIndices} screened indices</b>, not just these survivors —
+        so every index in this table is strong by construction, and even the lowest row here sits well above the market.
         <b style="color:var(--text)">Click a row</b> for its constituents ranked by stock RS.
       </div>
       <table class="rot"><thead><tr><th>#</th><th style="text-align:left">Index</th><th>RS</th><th>In</th>
@@ -916,6 +936,8 @@ function renderInsights() {
       <div style="font-size:11px;color:var(--muted)"><span class="spin"></span>Loading constituents…</div></div>`;
     const mem = S.selSyms.map(s => S.metrics[s]).filter(m => m && m.rs != null).sort((a, b) => b.rs - a.rs);
     const miss = S.selSyms.length - mem.length;
+    if (!mem.length) return `<div class="ins-card wide" style="border-color:var(--accent)">${head}
+      <div style="font-size:11px;color:var(--muted)"><span class="spin"></span>Pricing ${S.selSyms.length} constituents…</div></div>`;
     const hW = makeHeat(mem.map(x => x.w1), 3), h1 = makeHeat(mem.map(x => x.m1), 5),
           h3 = makeHeat(mem.map(x => x.m3), 10), h6 = makeHeat(mem.map(x => x.m6), 15);
     return `<div class="ins-card wide" style="border-color:var(--accent)">${head}

@@ -36,20 +36,29 @@ export default async function handler(req, res) {
       .filter(r => (hits[r.index] || []).length >= MIN_HITS)
       .map(r => ({ ...r, hits: hits[r.index], hitCount: hits[r.index].length }));
 
-    // 7: RS = percentile of the blended growth, ranked among the survivors
+    // 7: RS = percentile of blended growth, measured against EVERY screened index
+    // (not just the survivors). Percentiling within the survivors would give the
+    // weakest of an already-strong group RS 1, which reads as weakness when it is
+    // in fact top-decile of the whole market.
     const W = { d1: 0.10, w1: 0.15, m1: 0.30, m3: 0.25, m6: 0.20 };
-    for (const r of survivors) {
+    const blendOf = r => {
       let s = 0, w = 0;
       for (const k of Object.keys(W)) if (r[k] != null) { s += r[k] * W[k]; w += W[k]; }
-      r.blend = w > 0 ? s / w : null;
-    }
-    const ranked = survivors.filter(r => r.blend != null).sort((a, b) => a.blend - b.blend);
-    ranked.forEach((r, i) => { r.rs = ranked.length > 1 ? Math.round(i / (ranked.length - 1) * 98) + 1 : 50; });
-    ranked.sort((a, b) => b.blend - a.blend);
+      return w > 0 ? s / w : null;
+    };
+    for (const r of all) r.blend = blendOf(r);
+    const scale = all.filter(r => r.blend != null).sort((a, b) => a.blend - b.blend);
+    const rsOf = {};
+    scale.forEach((r, i) => { rsOf[r.index] = scale.length > 1 ? Math.round(i / (scale.length - 1) * 98) + 1 : 50; });
+
+    const ranked = survivors.filter(r => r.blend != null)
+      .map(r => ({ ...r, rs: rsOf[r.index] }))
+      .sort((a, b) => b.blend - a.blend);
 
     return res.status(200).json({
       asOf: data.asOf, windows: data.windows,
       totalIndices: all.length, topN: TOP_N, minHits: MIN_HITS,
+      rsBasis: scale.length,          // RS is a percentile across this many indices
       tops, list: ranked, ts: Date.now()
     });
   } catch (e) {
