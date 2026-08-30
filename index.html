@@ -90,7 +90,18 @@
   #modalChart { flex: 1; min-height: 0; }
 
   /* ===== Insights view ===== */
-  #insights, #portfolio { flex: 1; overflow: auto; padding: 12px; display: none; }
+  #insights, #portfolio { flex: 1; overflow: auto; padding: 12px; display: none; -webkit-overflow-scrolling: touch; }
+  /* ---- filter bar ---- */
+  .filterbar { display: flex; gap: 6px; flex-wrap: wrap; margin: 2px 0 10px; }
+  .fb { background: var(--panel2); color: var(--muted); border: 1px solid var(--border); border-radius: 8px;
+        padding: 7px 13px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;
+        transition: background .12s, color .12s, border-color .12s; min-height: 34px; }
+  .fb:hover { color: var(--text); border-color: var(--muted); }
+  .fb.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .fb .sub { display: block; font-size: 9px; font-weight: 400; opacity: .8; margin-top: 1px; }
+  .tblscroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .rot th.active, .rot td.active { background: rgba(41,98,255,.10); }
+  .rot th.active { color: var(--accent); }
   .idxbadge { font-size: 11px; padding: 3px 10px; border-radius: 6px; font-weight: 600; }
   .idxbadge.ok { background: #26a69a22; color: var(--green); border: 1px solid var(--green); }
   .idxbadge.no { background: #ef535022; color: var(--red); border: 1px solid var(--red); }
@@ -117,6 +128,33 @@
   .hilist { font-size: 11px; column-count: 2; column-gap: 30px; }
   .hilist div { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid #161b22; break-inside: avoid; }
   @media (max-width: 900px) { #side { display: none; } body { overflow: auto; } .ins-grid { grid-template-columns: 1fr; } .hilist { column-count: 1; } }
+
+  /* ================= mobile ================= */
+  @media (max-width: 700px) {
+    body { overflow: auto; }
+    #bar { padding: 8px 10px; gap: 8px; position: sticky; top: 0; }
+    #bar h1 { font-size: 14px; }
+    #bar .ctl, #bar .seg button, #bar select { font-size: 12px; }
+    #bar .seg button { padding: 7px 11px; min-height: 34px; }   /* touch targets */
+    .tgl { padding: 6px 10px; min-height: 32px; }
+    #strip { padding: 6px 10px; }
+    #insights, #portfolio { padding: 8px; }
+    .ins-card { padding: 10px; border-radius: 10px; }
+    .ins-card h3 { font-size: 12px; }
+    .fb { flex: 1 1 auto; text-align: center; padding: 9px 10px; min-height: 40px; }
+    /* tables scroll sideways instead of squeezing */
+    .rot { font-size: 11px; min-width: 560px; }
+    .rot th, .rot td { padding: 6px 5px; }
+    /* drop the least essential columns so the key ones fit */
+    .rot .m-hide { display: none; }
+    #gridWrap { padding: 6px; }
+    #modal { padding: 0; }
+    #modalCard { border-radius: 0; }
+  }
+  @media (max-width: 420px) {
+    .rot { min-width: 460px; }
+    .fb { font-size: 11px; padding: 8px 8px; }
+  }
 </style>
 </head>
 <body>
@@ -316,6 +354,7 @@ const S = {
   basket: "fno", lists: { fno: [], mtf: [] }, acct: { fno: 1000000, mtf: 1000000 },
   lots: {}, marginPct: 20,
   nseIdx: null, nseBusy: false, nseErr: null, selIdx: null, selSyms: null, selErr: null,
+  idxView: "hits", sectorSrc: null,
   mtfLev: {}, minMtfLev: 3, mtfLevDefault: 4, mtfLevExact: false,
   metrics: {}, metricsTime: 0, charts: {}, rows: [],
   showVol: true, showS20: false, showS50: false,
@@ -884,7 +923,9 @@ function computeIndexScreen() {
     .map(r => ({ ...r, rs: rsOf[r.index], hits: hits[r.index], hitCount: hits[r.index].length }))
     .sort((a, b) => b.blend - a.blend);
 
-  return { list, totalIndices: rows.length, rsBasis: scale.length,
+  // rows carries every index so the UI can build a top-25 list per timeframe
+  rows.forEach(r => { r.rs = rsOf[r.index]; r.hits = hits[r.index] || []; r.hitCount = (hits[r.index] || []).length; });
+  return { rows, list, totalIndices: rows.length, rsBasis: scale.length,
            topN: IDX_TOP_N, minHits: IDX_MIN_HITS, tops };
 }
 
@@ -964,31 +1005,52 @@ function renderInsights() {
       <div style="font-size:11px;color:var(--muted)"><span class="spin"></span>
       ${S.nseErr || "Loading NSE index constituents and prices…"}
       (${Object.keys(SECTORS).length} indices · ${Object.keys(S.metrics).length} stocks priced)</div></div>`;
-    const L = NI.list;
-    const hc = (k, f) => makeHeat(L.map(r => r[k]), f);
+
+    const TF = [
+      { k: "hits", lbl: "Strong", sub: `≥${NI.minHits} of 5` },
+      { k: "d1", lbl: "1 Day", sub: `top ${NI.topN}` },
+      { k: "w1", lbl: "1 Week", sub: `top ${NI.topN}` },
+      { k: "m1", lbl: "1 Month", sub: `top ${NI.topN}` },
+      { k: "m3", lbl: "3 Month", sub: `top ${NI.topN}` },
+      { k: "m6", lbl: "6 Month", sub: `top ${NI.topN}` }
+    ];
+    const view = S.idxView || "hits";
+    const active = view === "hits" ? null : view;
+    // survivors list, or a straight top-25 for the chosen timeframe
+    const L = view === "hits" ? NI.list
+      : NI.rows.filter(r => r[view] != null).sort((a, b) => b[view] - a[view]).slice(0, NI.topN);
+    const bar = `<div class="filterbar">${TF.map(t =>
+      `<button class="fb${view === t.k ? " on" : ""}" data-tf="${t.k}">${t.lbl}<span class="sub">${t.sub}</span></button>`).join("")}</div>`;
+    const caption = view === "hits"
+      ? `Indices in the top ${NI.topN} of at least ${NI.minHits} of the five timeframes — sustained strength, not a single hot window.`
+      : `Top ${NI.topN} indices by <b style="color:var(--accent)">${TF.find(t => t.k === view).lbl}</b> growth alone. The <b>In</b> column still shows how many of the five lists each one made.`;
+    const ac = k => k === active ? " class=\"active\"" : "";
+    // scale colours off ALL indices, not the visible subset, so a cell's shade
+    // means the same thing whichever filter you are on
+    const hc = (k, f) => makeHeat(NI.rows.map(r => r[k]), f);
     const H1 = hc("d1", 1.5), H2 = hc("w1", 3), H3 = hc("m1", 6), H4 = hc("m3", 10), H5 = hc("m6", 15);
     return `<div class="ins-card wide" style="border-color:var(--green)">
-      <h3 style="color:var(--green)">Strongest NSE Indices — top ${NI.topN} in at least ${NI.minHits} of 5 timeframes</h3>
-      <div style="font-size:10px;color:var(--muted);margin:-6px 0 8px">
-${NI.totalIndices} official NSE indices${S.sectorSrc === "nse-discovered" ? " (auto-discovered from NSE's own category pages — new indices appear automatically)" : ""} · equal-weighted from NSE's constituent lists.
-        Each timeframe has its own top-${NI.topN} list; only indices in ≥${NI.minHits} of the five survive.
-        <b style="color:var(--text)">RS is a percentile across all ${NI.rsBasis || NI.totalIndices} screened indices</b>, not just these survivors —
-        so every index in this table is strong by construction, and even the lowest row here sits well above the market.
-        <b style="color:var(--text)">Click a row</b> for its constituents ranked by stock RS.
+      <h3 style="color:var(--green)">Strongest NSE Indices</h3>
+      ${bar}
+      <div style="font-size:10px;color:var(--muted);margin:0 0 8px;line-height:1.5">
+        ${caption}<br>
+        ${NI.totalIndices} official NSE indices${S.sectorSrc === "nse-discovered" ? " · auto-discovered from NSE, new ones appear on their own" : ""} ·
+        equal-weighted from NSE's constituent lists · <b style="color:var(--text)">RS is a percentile across all ${NI.rsBasis || NI.totalIndices} indices</b>.
+        <b style="color:var(--text)">Tap a row</b> for constituents ranked by stock RS.
       </div>
-      <table class="rot"><thead><tr><th>#</th><th style="text-align:left">Index</th><th>RS</th><th>In</th>
-        <th>1D</th><th>1W</th><th>1M</th><th>3M</th><th>6M</th></tr></thead>
+      <div class="tblscroll"><table class="rot"><thead><tr><th>#</th><th style="text-align:left">Index</th><th>RS</th><th class="m-hide">In</th>
+        <th${ac("d1")}>1D</th><th${ac("w1")}>1W</th><th${ac("m1")}>1M</th><th${ac("m3")}>3M</th><th${ac("m6")}>6M</th></tr></thead>
       <tbody>${L.length ? L.map((r, i) => `<tr data-idx="${encodeURIComponent(r.index)}" style="cursor:pointer${S.selIdx === r.index ? ";background:var(--hl)" : ""}">
         <td>${i + 1}</td>
-        <td style="text-align:left"><b style="color:${S.selIdx === r.index ? "var(--accent)" : "var(--text)"}">${r.index}</b></td>
+        <td style="text-align:left"><b style="color:${S.selIdx === r.index ? "var(--accent)" : "var(--text)"}">${r.index.replace(/^NIFTY /, "")}</b></td>
         <td>${rsCell(r.rs)}</td>
-        <td><b>${r.hitCount}</b><span style="color:var(--muted)">/5</span></td>
-        <td style="background:${H1(r.d1)}">${N(r.d1)}</td>
-        <td style="background:${H2(r.w1)}">${N(r.w1)}</td>
-        <td style="background:${H3(r.m1)}">${N(r.m1)}</td>
-        <td style="background:${H4(r.m3)}">${N(r.m3)}</td>
-        <td style="background:${H5(r.m6)}">${N(r.m6)}</td></tr>`).join("")
-        : `<tr><td colspan="9" style="color:var(--muted)">No index is strong across ≥${NI.minHits} timeframes right now.</td></tr>`}</tbody></table>
+        <td class="m-hide"><b>${r.hitCount}</b><span style="color:var(--muted)">/5</span></td>
+        <td${ac("d1")} style="background:${H1(r.d1)}">${N(r.d1)}</td>
+        <td${ac("w1")} style="background:${H2(r.w1)}">${N(r.w1)}</td>
+        <td${ac("m1")} style="background:${H3(r.m1)}">${N(r.m1)}</td>
+        <td${ac("m3")} style="background:${H4(r.m3)}">${N(r.m3)}</td>
+        <td${ac("m6")} style="background:${H5(r.m6)}">${N(r.m6)}</td></tr>`).join("")
+        : `<tr><td colspan="9" style="color:var(--muted)">No index is strong across ≥${NI.minHits} timeframes right now.</td></tr>`}</tbody></table></div>
     </div>`;
   })();
 
@@ -1011,25 +1073,31 @@ ${NI.totalIndices} official NSE indices${S.sectorSrc === "nse-discovered" ? " (a
         ${mem.length} of ${S.selSyms.length} constituents priced${miss ? ` · ${miss} without data` : ""} · ranked by stock RS.
         Tags: <span class="tag vcp">F&amp;O</span> derivatives-eligible, <span class="tag pb">n×</span> Zerodha MTF leverage.
       </div>
-      <table class="rot"><thead><tr><th>#</th><th style="text-align:left">Symbol</th><th>LTP</th><th>RS</th>
-        <th>1D</th><th>1W</th><th>1M</th><th>3M</th><th>6M</th><th>ATR%</th><th>Momo</th></tr></thead>
+      <div class="tblscroll"><table class="rot"><thead><tr><th>#</th><th style="text-align:left">Symbol</th><th>LTP</th><th>RS</th>
+        <th class="m-hide">1D</th><th class="m-hide">1W</th><th>1M</th><th>3M</th><th>6M</th><th class="m-hide">ATR%</th><th class="m-hide">Momo</th></tr></thead>
       <tbody>${mem.map((m, i) => `<tr>
         <td>${i + 1}</td>
         <td style="text-align:left"><b>${m.sym}</b>${S.lots[m.sym] ? '<span class="tag vcp" style="margin-left:4px">F&amp;O</span>' : ""}${S.mtfLev[m.sym] ? `<span class="tag pb" style="margin-left:3px">${S.mtfLev[m.sym]}×</span>` : ""}</td>
         <td>${fmt(m.last)}</td><td>${rsCell(m.rs)}</td>
-        <td class="${cls(m.d1)}">${pc(m.d1)}</td>
-        <td style="background:${hW(m.w1)}">${N(m.w1)}</td>
+        <td class="m-hide ${cls(m.d1)}">${pc(m.d1)}</td>
+        <td class="m-hide" style="background:${hW(m.w1)}">${N(m.w1)}</td>
         <td style="background:${h1(m.m1)}">${N(m.m1)}</td>
         <td style="background:${h3(m.m3)}">${N(m.m3)}</td>
         <td style="background:${h6(m.m6)}">${N(m.m6)}</td>
-        <td style="color:#f5a623">${num(m.atrPct)}%</td>
-        <td style="color:var(--accent)">${num(m.momo, 0)}</td></tr>`).join("")}</tbody></table>
+        <td class="m-hide" style="color:#f5a623">${num(m.atrPct)}%</td>
+        <td class="m-hide" style="color:var(--accent)">${num(m.momo, 0)}</td></tr>`).join("")}</tbody></table></div>
     </div>`;
   })();
 
   el.innerHTML = `<div class="ins-grid">${nseCard}${constCard}</div>`;
   el.querySelectorAll("tr[data-idx]").forEach(tr =>
     tr.onclick = () => openIndex(decodeURIComponent(tr.dataset.idx)));
+  el.querySelectorAll(".fb[data-tf]").forEach(b =>
+    b.onclick = () => {
+      S.idxView = b.dataset.tf;
+      try { localStorage.setItem("mp_idxview", S.idxView) } catch (_) {}
+      renderInsights();
+    });
 }
 
 /* ================= Fullscreen modal ================= */
@@ -1349,6 +1417,8 @@ function init() {
     const a = JSON.parse(localStorage.getItem("mp_acct") || "null");
     if (a && a.fno > 0 && a.mtf > 0) S.acct = a;
     else { const old = parseInt(localStorage.getItem("mp_av") || "0", 10); if (old > 0) S.acct = { fno: old, mtf: old }; }
+    const iv = localStorage.getItem("mp_idxview");
+    if (iv) S.idxView = iv;
     const bk = localStorage.getItem("mp_basket");
     if (bk === "fno" || bk === "mtf") {
       S.basket = bk;
