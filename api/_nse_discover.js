@@ -71,14 +71,22 @@ export async function discoverIndexFiles() {
   if (!urls.length) return null;
 
   const found = {};
+  const noFile = [], skipped = [], unreachable = [];
   await pMap(urls, 12, async url => {
     const html = await get(url);
-    if (!html) return;
-    const m = html.match(/IndexConstituent\/([A-Za-z0-9_\-]+)\.csv/);
-    if (!m) return;                                  // no constituent file published
+    if (!html) { unreachable.push(url.split("/").pop()); return; }
     const name = pageName(html, url);
-    if (!name || SKIP.test(name)) return;
+    if (!name) return;
+    if (SKIP.test(name)) { skipped.push(name); return; }
+    const m = html.match(/IndexConstituent\/([A-Za-z0-9_\-]+)\.csv/);
+    if (!m) { noFile.push(name); return; }           // NSE publishes no constituent CSV
     if (!found[name]) found[name] = m[1];
   });
-  return Object.keys(found).length ? found : null;
+  if (!Object.keys(found).length) return null;
+  // attach diagnostics without disturbing the map's shape
+  Object.defineProperty(found, "__diag", {
+    value: { pages: urls.length, resolved: Object.keys(found).length, noFile, skipped, unreachable },
+    enumerable: false
+  });
+  return found;
 }

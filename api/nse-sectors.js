@@ -13,12 +13,17 @@ export default async function handler(req, res) {
   try {
     // Walk NSE's category pages for EVERY equity index, then read each index
     // page for the constituent CSV it links to. Falls back to the static map.
-    let sectors = null, source = "nse-discovered", discovered = 0;
+    let sectors = null, source = "nse-discovered", discovered = 0, diag = null;
     try {
       const files = await discoverIndexFiles();
       if (files) {
         discovered = Object.keys(files).length;
+        diag = files.__diag || null;
         sectors = await fetchByFileMap(files);
+        if (diag) {
+          // indices whose CSV was found but wouldn't download/parse
+          diag.csvFailed = Object.keys(files).filter(n => !sectors[n]);
+        }
       }
     } catch (_) { /* fall through */ }
 
@@ -34,7 +39,7 @@ export default async function handler(req, res) {
       const stocks = [...new Set(Object.values(sectors).flat())];
       return res.status(200).json({
         source, discovered, indices: n, stocks: stocks.length,
-        sectors, universe: stocks, ts: Date.now()
+        coverage: diag, sectors, universe: stocks, ts: Date.now()
       });
     }
     // partial / empty -> fall back

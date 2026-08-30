@@ -261,6 +261,7 @@ async function loadUniverse() {
       if (j.sectors && Object.keys(j.sectors).length >= 10) {
         setSectors(j.sectors, j.source || "NSE");
         S.sectorSrc = j.source;
+        S.coverage = j.coverage || null;
         // every index constituent must be priced, or sectors are computed on partial data
         if (Array.isArray(j.universe) && j.universe.length) {
           UNIVERSE = [...new Set([...UNIVERSE, ...j.universe])];
@@ -354,7 +355,7 @@ const S = {
   basket: "fno", lists: { fno: [], mtf: [] }, acct: { fno: 1000000, mtf: 1000000 },
   lots: {}, marginPct: 20,
   nseIdx: null, nseBusy: false, nseErr: null, selIdx: null, selSyms: null, selErr: null,
-  idxView: "hits", sectorSrc: null,
+  idxView: "hits", sectorSrc: null, coverage: null,
   mtfLev: {}, minMtfLev: 3, mtfLevDefault: 4, mtfLevExact: false,
   metrics: {}, metricsTime: 0, charts: {}, rows: [],
   showVol: true, showS20: false, showS50: false,
@@ -929,6 +930,23 @@ function computeIndexScreen() {
            topN: IDX_TOP_N, minHits: IDX_MIN_HITS, tops };
 }
 
+/* Coverage line: NSE lists 155 equity indices; 11 are leveraged/inverse/futures/
+   arbitrage/debt variants that make no sense in a growth screen, leaving 144
+   usable. Anything short of that is an index NSE publishes no constituent file
+   for, so it is stated rather than hidden. */
+function coverageNote() {
+  const c = S.coverage;
+  if (!c) return "";
+  const parts = [];
+  if (c.pages) parts.push(`${c.pages} index pages scanned`);
+  if (c.resolved) parts.push(`${c.resolved} with constituent files`);
+  const gaps = [];
+  if (c.noFile && c.noFile.length) gaps.push(`${c.noFile.length} publish no constituent list (${c.noFile.slice(0, 4).join(", ")}${c.noFile.length > 4 ? "…" : ""})`);
+  if (c.csvFailed && c.csvFailed.length) gaps.push(`${c.csvFailed.length} failed to download`);
+  if (c.skipped && c.skipped.length) gaps.push(`${c.skipped.length} excluded as leveraged/inverse/futures/debt variants`);
+  return `<br><span style="color:var(--muted)">Coverage: ${parts.join(" · ")}${gaps.length ? " · " + gaps.join(" · ") : ""}.</span>`;
+}
+
 function loadNseIndices() {
   const res = computeIndexScreen();
   if (res) { S.nseIdx = res; S.nseErr = null; }
@@ -1034,9 +1052,10 @@ function renderInsights() {
       ${bar}
       <div style="font-size:10px;color:var(--muted);margin:0 0 8px;line-height:1.5">
         ${caption}<br>
-        ${NI.totalIndices} official NSE indices${S.sectorSrc === "nse-discovered" ? " · auto-discovered from NSE, new ones appear on their own" : ""} ·
+        ${NI.totalIndices} official NSE indices${S.sectorSrc === "nse-discovered" ? " · auto-discovered, new ones appear on their own" : ""} ·
         equal-weighted from NSE's constituent lists · <b style="color:var(--text)">RS is a percentile across all ${NI.rsBasis || NI.totalIndices} indices</b>.
         <b style="color:var(--text)">Tap a row</b> for constituents ranked by stock RS.
+        ${coverageNote()}
       </div>
       <div class="tblscroll"><table class="rot"><thead><tr><th>#</th><th style="text-align:left">Index</th><th>RS</th><th class="m-hide">In</th>
         <th${ac("d1")}>1D</th><th${ac("w1")}>1W</th><th${ac("m1")}>1M</th><th${ac("m3")}>3M</th><th${ac("m6")}>6M</th></tr></thead>
