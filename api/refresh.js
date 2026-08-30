@@ -3,7 +3,8 @@
 // market hours from cron-job.org — the app then loads instantly from /api/snapshot,
 // even for the first visitor of the day.
 import { UNIVERSE as BASE_UNIVERSE, FNO, MTF3, mtfLev } from "./_universe.js";
-import { fetchAllSectors } from "./_nse_indices.js";
+import { fetchAllSectors, fetchByFileMap } from "./_nse_indices.js";
+import { discoverIndexFiles } from "./_nse_discover.js";
 const H = { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", "Accept": "application/json" };
 
 async function yChart(s, range, interval) {
@@ -143,8 +144,16 @@ export default async function handler(req, res) {
 
   // Universe = our F&O/MTF baskets PLUS every constituent of the official NSE
   // sectoral indices, so sector stats are never computed on partial membership.
+  // Discover EVERY NSE equity index and price all of their constituents, so no
+  // index is dropped from the screen for want of member data.
   let sectors = {};
-  try { sectors = await fetchAllSectors(); } catch (_) {}
+  try {
+    const files = await discoverIndexFiles();
+    if (files) sectors = await fetchByFileMap(files);
+  } catch (_) {}
+  if (Object.keys(sectors).length < 20) {
+    try { sectors = await fetchAllSectors(); } catch (_) {}
+  }
   const UNIVERSE = [...new Set([...BASE_UNIVERSE, ...Object.values(sectors).flat()])];
 
   const daily = {}, intraday = {};
@@ -225,5 +234,11 @@ export default async function handler(req, res) {
       stored = r.ok;
     } catch (_) {}
   }
-  return res.status(200).json({ ok: true, stored, kvConfigured: !!(url && tok), symbols: Object.keys(metrics).length, ts: snap.ts });
+  return res.status(200).json({
+    ok: true, stored, kvConfigured: !!(url && tok),
+    symbols: Object.keys(metrics).length,
+    indices: Object.keys(sectors).length,
+    universe: UNIVERSE.length,
+    ts: snap.ts
+  });
 }

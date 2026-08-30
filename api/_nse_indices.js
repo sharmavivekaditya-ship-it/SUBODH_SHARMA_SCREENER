@@ -112,6 +112,34 @@ export function parseConstituents(text) {
   return syms.length ? syms : null;
 }
 
+/* Fetch constituents for an arbitrary { indexName: csvFileStem } map. */
+export async function fetchByFileMap(fileMap) {
+  const H = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    "Accept": "text/csv,application/octet-stream,*/*",
+    "Referer": "https://www.niftyindices.com/indices/equity/sectoral-indices"
+  };
+  const entries = Object.entries(fileMap);
+  const out = {};
+  let i = 0;
+  await Promise.all(Array.from({ length: 12 }, async () => {
+    while (i < entries.length) {
+      const [name, file] = entries[i++];
+      const ac = new AbortController();
+      const t = setTimeout(() => ac.abort(), 8000);
+      try {
+        const r = await fetch(`${CSV_BASE}/${file}.csv`, { headers: H, signal: ac.signal });
+        if (r.ok) {
+          const syms = parseConstituents(await r.text());
+          if (syms) out[name] = syms;
+        }
+      } catch (_) { /* skip */ }
+      finally { clearTimeout(t); }
+    }
+  }));
+  return out;
+}
+
 export async function fetchAllSectors(includeExtras = true) {
   const H = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",

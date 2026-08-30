@@ -221,7 +221,8 @@ async function loadUniverse() {
     if (r.ok) {
       const j = await r.json();
       if (j.sectors && Object.keys(j.sectors).length >= 10) {
-        setSectors(j.sectors, j.source === "nse" ? "NSE" : "bundled");
+        setSectors(j.sectors, j.source || "NSE");
+        S.sectorSrc = j.source;
         // every index constituent must be priced, or sectors are computed on partial data
         if (Array.isArray(j.universe) && j.universe.length) {
           UNIVERSE = [...new Set([...UNIVERSE, ...j.universe])];
@@ -969,7 +970,7 @@ function renderInsights() {
     return `<div class="ins-card wide" style="border-color:var(--green)">
       <h3 style="color:var(--green)">Strongest NSE Indices — top ${NI.topN} in at least ${NI.minHits} of 5 timeframes</h3>
       <div style="font-size:10px;color:var(--muted);margin:-6px 0 8px">
-        ${NI.totalIndices} official NSE indices · equal-weighted from NSE's own constituent lists.
+${NI.totalIndices} official NSE indices${S.sectorSrc === "nse-discovered" ? " (auto-discovered from NSE's own category pages — new indices appear automatically)" : ""} · equal-weighted from NSE's constituent lists.
         Each timeframe has its own top-${NI.topN} list; only indices in ≥${NI.minHits} of the five survive.
         <b style="color:var(--text)">RS is a percentile across all ${NI.rsBasis || NI.totalIndices} screened indices</b>, not just these survivors —
         so every index in this table is strong by construction, and even the lowest row here sits well above the market.
